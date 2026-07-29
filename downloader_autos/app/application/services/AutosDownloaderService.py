@@ -46,7 +46,7 @@ class AutosDownloaderService(IAutosDownloaderService):
 
             consecutiveMap = {}
             seenHashes = set()
-            stats = {"insertados": 0,"omitidosPorUrl": 0,"omitidosPorHash": 0,"errores": 0}
+            stats = {"insertados": 0,"omitidosPorUrl": 0,"omitidosPorHash": 0,"omitidosPorPdfInvalido": 0,"omitidosPorNoDisponible": 0,"errores": 0}
             for auto in message.autos:
                 try:
                     if await self.cAutoRamaRep.checkAutoExist(conn, auto.fechaAuto, message.radicacion, auto.urlAuto, message.origen):
@@ -54,10 +54,25 @@ class AutosDownloaderService(IAutosDownloaderService):
                         continue
 
                     urlFinal = await self.httpClient.resolveFinalUrl(auto.urlAuto)
+                    if urlFinal is None:
+                        stats["omitidosPorNoDisponible"] += 1
+                        self.logger.warning(
+                            f"🟡 Documento no disponible en Ekogui (sin permiso o no existe) - "
+                            f"radicacion={message.radicacion} fecha={auto.fechaAuto} url={auto.urlAuto}"
+                        )
+                        continue
 
                     tempFileName = f"tmp_{uuid.uuid4().hex}.pdf"
                     filePath = outputDir / tempFileName
                     await self.httpClient.downloadToFile(urlFinal, str(filePath))
+
+                    if not self.tempWorkspace.isValidPdf(filePath):
+                        stats["omitidosPorPdfInvalido"] += 1
+                        self.logger.warning(
+                            f"🟡 PDF invalido descartado - radicacion={message.radicacion} fecha={auto.fechaAuto} "
+                            f"url={auto.urlAuto}"
+                        )
+                        continue
 
                     fileHash = self.tempWorkspace.hashFile(filePath)
                     if not fileHash:
@@ -100,7 +115,8 @@ class AutosDownloaderService(IAutosDownloaderService):
             self.logger.info(
                 f"📊 Resumen descarga autos - radicacion={message.radicacion} total={len(message.autos)} "
                 f"|🟢insertados={stats['insertados']} | 🔁omitidosPorUrl={stats['omitidosPorUrl']} | "
-                f"| 🔗omitidosPorHash={stats['omitidosPorHash']} | 🔴errores={stats['errores']}"
+                f"| 🔗omitidosPorHash={stats['omitidosPorHash']} | 📄omitidosPorPdfInvalido={stats['omitidosPorPdfInvalido']} "
+                f"| 🚫omitidosPorNoDisponible={stats['omitidosPorNoDisponible']} | 🔴errores={stats['errores']}"
             )
             await self.db.commit(conn)
 

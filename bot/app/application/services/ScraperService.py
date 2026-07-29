@@ -161,8 +161,20 @@ class ScraperService(IScraperService):
             )
 
         publicadas = 0
+        vistas: set[tuple] = set()
         try:
             for actuacionDto in actuaciones:
+                clave = (
+                    actuacionDto.RADICADO_RAMA,
+                    actuacionDto.FECHA_ACTUACION,
+                    actuacionDto.ACTUACION_RAMA,
+                    actuacionDto.ANOTACION_RAMA,
+                    actuacionDto.ORIGEN_DATOS,
+                )
+                if clave in vistas:
+                    continue
+                vistas.add(clave)
+
                 existe = False
                 if conn:
                     existe = await self.dataBaseService.actuacionExiste(

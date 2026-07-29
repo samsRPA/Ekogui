@@ -25,12 +25,14 @@ class IHttpClient(ABC):
         ...
 
     @abstractmethod
-    async def resolveFinalUrl(self, imagenUrl: str) -> str:
+    async def resolveFinalUrl(self, imagenUrl: str) -> str | None:
         """Resuelve la URL 'imagen?g=<hash>' de Ekogui (estable, no expira)
         a la URL final y ephemera del PDF ('.../temporales/<archivo>.pdf')
         que el SGD genera al visitarla. Esa URL final es la que hay que
         descargar; la 'imagen?g=' por si sola solo devuelve un HTML
-        intermedio con un <embed> apuntando al PDF real."""
+        intermedio con un <embed> apuntando al PDF real. Retorna None si
+        Ekogui responde que el documento no existe o no hay permiso para
+        verlo — el llamador debe omitir ese auto sin tratarlo como error."""
         ...
 
     @abstractmethod

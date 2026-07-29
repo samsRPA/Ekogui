@@ -17,6 +17,17 @@ class TempWorkspace:
                 sha256.update(chunk)
         return sha256.hexdigest()
 
+    def isValidPdf(self, filePath: Path) -> bool:
+        """Valida que el archivo descargado sea realmente un PDF (empieza
+        con el magic header '%PDF-'). Ekogui a veces responde con una
+        pagina HTML intermedia en vez del PDF; esto evita subir esa basura
+        a S3 disfrazada de '.pdf'."""
+        try:
+            with open(filePath, "rb") as f:
+                return f.read(5) == b"%PDF-"
+        except Exception:
+            return False
+
     def _createFolder(self, folderName: str) -> Path:
         path = self.basePath / folderName
         path.mkdir(parents=True, exist_ok=True)

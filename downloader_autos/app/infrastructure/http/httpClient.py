@@ -163,20 +163,32 @@ class AioHttpClient(IHttpClient):
         except Exception:
             return None
 
-    async def resolveFinalUrl(self, imagenUrl: str) -> str:
+    async def resolveFinalUrl(self, imagenUrl: str) -> Optional[str]:
         """GET a la URL 'imagen?g=<hash>' de Ekogui -> le indica al SGD que
         genere el archivo temporal descargable; la respuesta trae su nombre
         real en un <embed src='...temporales\\<archivo>.pdf'>. Retorna la
-        URL final del PDF (no descarga su contenido)."""
+        URL final del PDF (no descarga su contenido), o None si Ekogui
+        responde explicitamente que el documento no existe o no hay
+        permiso para verlo ('ControlDoc/Error.jsp') — caso esperado, no
+        reintentable, que el llamador debe simplemente omitir."""
         proxy = self._currentProxy()
         proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
         async with self.session.get(imagenUrl, proxy=proxy, proxy_headers=proxyHeaders) as response:
+            status = response.status
+            finalUrl = str(response.url)
             response.raise_for_status()
             html = await response.text()
 
+        if "ControlDoc/Error.jsp" in finalUrl:
+            return None
+
         match = re.search(r"temporales[\\/]([^'\"]+)", html)
         if not match or not match.group(1) or match.group(1) == ".pdf":
-            raise RuntimeError(f"No se encontro un archivo temporal valido en la respuesta de {imagenUrl}")
+            snippet = html[:300].replace("\n", " ").replace("\r", "")
+            raise RuntimeError(
+                f"No se encontro un archivo temporal valido en la respuesta de {imagenUrl} "
+                f"(status={status} url_final={finalUrl} body={snippet!r})"
+            )
         fileName = match.group(1)
 
         parsed = urlparse(imagenUrl)
