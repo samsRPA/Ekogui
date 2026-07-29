@@ -1,0 +1,194 @@
+services:
+  rabbitmq_ekogui:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_ekogui
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 7200000 -rabbit heartbeat 30"
+    networks:
+      - ekogui_net
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 45s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # depends_on:
+    #   ssh_ekogui:
+    #     condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 4096M
+        reservations:
+          memory: 2048M
+
+  ssh_ekogui:
+    image: alpine:latest
+    container_name: ssh_ekogui
+    volumes:
+      - ./stack/ssh_tunnel/bd-tunnel.sh:/bd-tunnel.sh:ro
+      - ./stack:/keys
+    command: sh /bd-tunnel.sh
+    env_file:
+      - ./stack/ssh_tunnel/.env
+    networks:
+      - ekogui_net
+    restart: always
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -tn | grep -q ESTABLISHED"]
+      interval: 30s
+      timeout: 15s
+      retries: 4
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+  ms_ekogui:
+    image: ms_ekogui:latest
+    container_name: ms_ekogui
+    restart: always
+    build:
+      # El build context es la RAIZ del repo (no ./ms_ekogui) para poder
+      # copiar el certificado compartido en /shared/certs dentro de la
+      # imagen (ver ms_ekogui/Dockerfile).
+      context: .
+      dockerfile: ms_ekogui/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - ekogui_net
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    depends_on:
+      rabbitmq_ekogui:
+        condition: service_healthy
+
+  bot:
+      build:
+        # El build context es la RAIZ del repo (no ./bot) para poder
+        # copiar el certificado compartido en /shared/certs dentro de la
+        # imagen (ver bot/Dockerfile).
+        context: .
+        dockerfile: bot/Dockerfile
+      image: bot:latest
+      # container_name: bot
+      deploy:
+        replicas: 1
+        restart_policy:
+          condition: on-failure
+        resources:
+          limits:
+            memory: 3g
+          reservations:
+            memory: 1g
+      shm_size: "2gb"
+      volumes:
+        - ./temp:/app/temp
+        - /etc/localtime:/etc/localtime:ro
+        - /etc/timezone:/etc/timezone:ro
+      networks:
+        - ekogui_net
+      logging:
+        driver: "json-file"
+        options:
+          max-size: "10m"
+          max-file: "3"
+      depends_on:
+        ms_ekogui:
+          condition: service_healthy
+
+  downloader_autos:
+      build:
+        context: ./downloader_autos
+      image: downloader_autos:latest
+      # container_name: downloader_autos
+      deploy:
+        replicas: 1
+        restart_policy:
+          condition: on-failure
+        resources:
+          limits:
+            memory: 1g
+          reservations:
+            memory: 256M
+      volumes:
+        - ./temp_autos:/app/temp
+        - /etc/localtime:/etc/localtime:ro
+        - /etc/timezone:/etc/timezone:ro
+      networks:
+        - ekogui_net
+      logging:
+        driver: "json-file"
+        options:
+          max-size: "10m"
+          max-file: "3"
+      depends_on:
+        rabbitmq_ekogui:
+          condition: service_healthy
+
+  collector_ekogui:
+    build:
+      context: ./collector_ekogui
+    image: collector_ekogui:latest
+    container_name: collector_ekogui
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 1536M
+
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      - ekogui_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      bot:
+        condition: service_started
+
+networks:
+  ekogui_net:
+    driver: bridge

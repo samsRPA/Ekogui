@@ -1,0 +1,5 @@
+aio-pika==9.5.5
+dependency-injector==4.46.0
+pydantic==2.11.7
+pydantic-settings==2.9.1
+oracledb==3.1.1

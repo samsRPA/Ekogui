@@ -1,0 +1,16 @@
+aiofiles==24.1.0
+aio-pika==9.5.5
+aiohttp==3.12.2
+beautifulsoup4==4.13.4
+boto3==1.40.16
+dependency-injector==4.46.0
+charset-normalizer==3.4.3
+email_validator==2.2.0
+lxml==6.0.1
+pydantic==2.11.7
+pydantic-settings==2.9.1
+polars==1.32.3
+pymupdf==1.25.5
+python-docx==1.2.0
+oracledb==3.1.1
+certifi==2026.7.22

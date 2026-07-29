@@ -1,0 +1,5 @@
+# sectigo intermadiete Key Configuration
+
+Place sectigo key (.pem) file for the database connection in this directory.
+
+Expected filename: sectigo_intermediate.pem
