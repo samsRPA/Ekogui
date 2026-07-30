@@ -16,6 +16,15 @@ from app.infrastructure.http.httpClient import AioHttpClient
 from app.infrastructure.filesystem.TempWorkspace import TempWorkspace
 from app.infrastructure.rabbitmq.RabbitMQConsumer import RabbitMQConsumer
 from app.infrastructure.database.repositories.CAutoRamaRep import CAutoRamaRep
+from app.application.factories.ProcessorFactory import ProcessorFactory
+from app.domain.interfaces.IFileProcessor import IFileProcessor
+from app.domain.interfaces.IProcessorFactory import IProcessorFactory
+from app.infrastructure.downloaders.DocxProcessor import DocxProcessor
+from app.infrastructure.downloaders.ImageProcessor import ImageProcessor
+from app.infrastructure.downloaders.PdfProcessor import PdfProcessor
+from app.infrastructure.downloaders.XlsxProcessor import XlsxProcessor
+from app.infrastructure.downloaders.HtmlXlsProcessor import HtmlXlsProcessor
+from app.infrastructure.downloaders.CompressedProcessor import CompressedProcessor
 
 
 class Dependencies(containers.DeclarativeContainer):
@@ -65,6 +74,46 @@ class Dependencies(containers.DeclarativeContainer):
         prefixNft=settings.provided.s3.prefixAutos,
     )
 
+    # Provider de procesadores: descargan y convierten a PDF sin tocar el
+    # contenido original.
+    pdfProcessor: providers.Factory[IFileProcessor] = providers.Factory(PdfProcessor)
+    docxProcessor: providers.Factory[IFileProcessor] = providers.Factory(DocxProcessor)
+    imageProcessor: providers.Factory[IFileProcessor] = providers.Factory(ImageProcessor)
+    xlsxProcessor: providers.Factory[IFileProcessor] = providers.Factory(XlsxProcessor)
+    htmlXlsProcessor: providers.Factory[IFileProcessor] = providers.Factory(HtmlXlsProcessor)
+
+    # CompressedProcessor necesita la propia ProcessorFactory para poder
+    # resolver cada archivo que trae adentro (incluyendo un comprimido
+    # dentro de otro). Como processorFactory a su vez necesita apuntar a
+    # compressedProcessor en su mapa, se crea primero sin esa dependencia y
+    # se completa con add_kwargs() una vez que processorFactory ya existe
+    # -> unica forma de romper el ciclo en la definicion del contenedor.
+    compressedProcessor: providers.Factory[IFileProcessor] = providers.Factory(CompressedProcessor)
+
+    # ProcessorFactory con mapa inyectado
+    processorFactory: providers.Factory[IProcessorFactory] = providers.Factory(
+        ProcessorFactory,
+        processorMap={
+            "application/pdf": pdfProcessor,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": docxProcessor,
+            "application/msword": docxProcessor,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": xlsxProcessor,
+            "application/vnd.ms-excel": xlsxProcessor,
+            "image/png": imageProcessor,
+            "image/jpeg": imageProcessor,
+            "image/jpg": imageProcessor,
+            "image/webp": imageProcessor,
+            "image/gif": imageProcessor,
+            "image/bmp": imageProcessor,
+            "image/tiff": imageProcessor,
+            "htmlXsl": htmlXlsProcessor,
+            "application/zip": compressedProcessor,
+            "application/x-7z-compressed": compressedProcessor,
+            "application/x-rar-compressed": compressedProcessor,
+        }
+    )
+    compressedProcessor.add_kwargs(processorFactory=processorFactory)
+
     # Servicio principal
     autosDownloaderService: providers.Factory[IAutosDownloaderService] = providers.Factory(
         AutosDownloaderService,
@@ -73,6 +122,7 @@ class Dependencies(containers.DeclarativeContainer):
         db=db,
         s3Manager=s3Manager,
         cAutoRamaRep=cAutoRamaRep,
+        processorFactory=processorFactory,
     )
 
     # Consumidor RabbitMQ

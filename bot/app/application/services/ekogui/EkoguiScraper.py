@@ -1,6 +1,7 @@
 import re
 import json
 import time
+import asyncio
 import logging
 import urllib.parse
 from pathlib import Path
@@ -11,6 +12,13 @@ from app.domain.interfaces.IContextClient import IContextClient
 from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
 
 CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
+
+# El gateway Zuul de Ekogui a veces corta la peticion con un 500 cuando el
+# backend/SGD esta lento o caido, y devuelve un cuerpo JSON de error en vez
+# de la URL esperada. Es transitorio: reintentar con backoff normalmente
+# resuelve. Si se propagara tal cual, ese JSON terminaria publicado como
+# 'urlAuto' en la cola de autos.
+_ZUUL_ERROR_RE = re.compile(r'"exception"\s*:\s*"com\.netflix\.zuul\.exception\.ZuulException"')
 
 
 class EkoguiScraper(IEkoguiScraper):
@@ -298,11 +306,15 @@ class EkoguiScraper(IEkoguiScraper):
         return documentos
 
     async def obtenerUrlDocumento(self, client: IContextClient, idToken: str,
-                                   procesoId: int, archivoId: int) -> str:
+                                   procesoId: int, archivoId: int,
+                                   maxRetries: int = 3, backoffSeconds: float = 2.0) -> str:
         """GET .../ekoguimstransversales/api/documento-soporte/obtenerURLDocumentoSoporte/{procesoId}/{archivoId}
         -> URL de texto plano (https://sgdea.../mercurio/consulta/imagen?g=<hash>)
         que hay que visitar para que el SGD genere el archivo temporal
-        descargable."""
+        descargable. Si el gateway Zuul devuelve un 500 SHORTCIRCUIT/GENERAL
+        (backend/SGD lento o caido), reintenta con backoff antes de
+        rendirse. Nunca retorna un cuerpo que no sea una URL http(s) real
+        -> evita publicar basura como 'urlAuto' en la cola de autos."""
         url = (
             f"{self.msBaseUrl}/ekoguimstransversales/api/documento-soporte/obtenerURLDocumentoSoporte/{procesoId}/{archivoId}"
             f"?cacheBuster={self._cacheBuster()}&method=obtenerURLDocumentoSoporte"
@@ -313,9 +325,34 @@ class EkoguiScraper(IEkoguiScraper):
             "X-Xsrf-Token": self._msXsrf,
             "Referer": f"{self.msBaseUrl}/",
         }
-        resp = await client.get(url, headers=headers)
-        self._refreshMsXsrf(resp)
-        imagenUrl = (await resp.text()).strip()
-        if "%3A" in imagenUrl or "%2F" in imagenUrl:
-            imagenUrl = urllib.parse.unquote(imagenUrl)
-        return imagenUrl
+
+        for attempt in range(1, maxRetries + 1):
+            resp = await client.get(url, headers=headers)
+            self._refreshMsXsrf(resp)
+            body = (await resp.text()).strip()
+
+            if "%3A" in body or "%2F" in body:
+                body = urllib.parse.unquote(body)
+
+            if resp.status == 200 and body.lower().startswith(("http://", "https://")):
+                return body
+
+            if resp.status >= 500 and _ZUUL_ERROR_RE.search(body) and attempt < maxRetries:
+                wait = backoffSeconds * attempt
+                self.logger.warning(
+                    f"🟡 Zuul devolvio error transitorio (status={resp.status}) al resolver URL de "
+                    f"procesoId={procesoId} archivoId={archivoId}; reintentando en {wait}s "
+                    f"(intento {attempt}/{maxRetries})"
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            raise RuntimeError(
+                f"Respuesta invalida al resolver URL de documento (status={resp.status} "
+                f"procesoId={procesoId} archivoId={archivoId}): {body[:300]!r}"
+            )
+
+        raise RuntimeError(
+            f"No se pudo resolver URL de documento tras {maxRetries} intentos "
+            f"(procesoId={procesoId} archivoId={archivoId})"
+        )

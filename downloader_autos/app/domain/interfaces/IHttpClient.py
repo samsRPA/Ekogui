@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from app.domain.interfaces.IContextClient import IContextClient
+from app.domain.dto.FetchedDocument import FetchedDocument
 
 class IHttpClient(ABC):
     @abstractmethod
@@ -15,24 +16,16 @@ class IHttpClient(ABC):
         ...
 
     @abstractmethod
-    async def detectMimeType(self, url: str) -> str | None:
-        """Detecta la extensión del archivo en una URL basándose en el Content-Type."""
-        ...
-
-    @abstractmethod
-    async def downloadToFile(self, url: str, filePath: str, headers: dict = None, chunk_size: int = 4096, maxRetries: int = 2) -> str:
-        """Descarga un archivo desde una URL y lo guarda en disco."""
-        ...
-
-    @abstractmethod
-    async def resolveFinalUrl(self, imagenUrl: str) -> str | None:
-        """Resuelve la URL 'imagen?g=<hash>' de Ekogui (estable, no expira)
-        a la URL final y ephemera del PDF ('.../temporales/<archivo>.pdf')
-        que el SGD genera al visitarla. Esa URL final es la que hay que
-        descargar; la 'imagen?g=' por si sola solo devuelve un HTML
-        intermedio con un <embed> apuntando al PDF real. Retorna None si
-        Ekogui responde que el documento no existe o no hay permiso para
-        verlo — el llamador debe omitir ese auto sin tratarlo como error."""
+    async def fetchDocument(self, imagenUrl: str) -> Optional[FetchedDocument]:
+        """Resuelve y descarga en memoria el documento detras de la URL
+        'imagen?g=<hash>' de Ekogui. A veces esa URL devuelve directo el
+        archivo binario (PDF/imagen/word); otras veces devuelve una pagina
+        HTML intermedia con un <embed src='...temporales\\<archivo>.pdf'>
+        que hay que seguir para obtener el archivo real. En ambos casos
+        retorna el documento ya descargado con su Content-Type real.
+        Retorna None si Ekogui responde que el documento no existe o no
+        hay permiso para verlo — el llamador debe omitir ese auto sin
+        tratarlo como error."""
         ...
 
     @abstractmethod

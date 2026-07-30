@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 import aiohttp
-import aiofiles
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 
 from app.domain.interfaces.IHttpClient import IHttpClient
 from app.domain.interfaces.IContextClient import IContextClient
+from app.domain.dto.FetchedDocument import FetchedDocument
+from app.domain.dto.ContentTypeSniffer import ContentTypeSniffer
 
 class AioHttpClient(IHttpClient):
     def __init__(self, proxies: List[Optional[str]] = None, maxConnections: int = 20, timeoutSeconds: int = 120):
@@ -163,49 +164,24 @@ class AioHttpClient(IHttpClient):
         except Exception:
             return None
 
-    async def resolveFinalUrl(self, imagenUrl: str) -> Optional[str]:
-        """GET a la URL 'imagen?g=<hash>' de Ekogui -> le indica al SGD que
-        genere el archivo temporal descargable; la respuesta trae su nombre
-        real en un <embed src='...temporales\\<archivo>.pdf'>. Retorna la
-        URL final del PDF (no descarga su contenido), o None si Ekogui
-        responde explicitamente que el documento no existe o no hay
-        permiso para verlo ('ControlDoc/Error.jsp') — caso esperado, no
-        reintentable, que el llamador debe simplemente omitir."""
-        proxy = self._currentProxy()
-        proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
-        async with self.session.get(imagenUrl, proxy=proxy, proxy_headers=proxyHeaders) as response:
-            status = response.status
-            finalUrl = str(response.url)
-            response.raise_for_status()
-            html = await response.text()
+    def _resolvedContentType(self, response: aiohttp.ClientResponse, content: bytes, fileName: Optional[str]) -> str:
+        declared = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if ContentTypeSniffer.isUnreliable(declared):
+            declared = ContentTypeSniffer.sniffContentType(content) or declared
+        return ContentTypeSniffer.refineByExtension(declared, fileName)
 
-        if "ControlDoc/Error.jsp" in finalUrl:
-            return None
-
-        match = re.search(r"temporales[\\/]([^'\"]+)", html)
-        if not match or not match.group(1) or match.group(1) == ".pdf":
-            snippet = html[:300].replace("\n", " ").replace("\r", "")
-            raise RuntimeError(
-                f"No se encontro un archivo temporal valido en la respuesta de {imagenUrl} "
-                f"(status={status} url_final={finalUrl} body={snippet!r})"
-            )
-        fileName = match.group(1)
-
-        parsed = urlparse(imagenUrl)
-        return f"{parsed.scheme}://{parsed.netloc}/mercurio/imagenesapp/temporales/{fileName}"
-
-    async def downloadToFile(self, url, filePath, headers=None, chunk_size: int = 4096, maxRetries: int = 2):
+    async def _fetchBinary(self, url: str, fallbackFileName: Optional[str] = None, maxRetries: int = 2) -> FetchedDocument:
         lastError = None
         for attempt in range(1, maxRetries + 1):
             proxy = self._currentProxy()
             proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
             try:
-                async with self.session.get(url, headers=headers, proxy=proxy, proxy_headers=proxyHeaders) as response:
+                async with self.session.get(url, proxy=proxy, proxy_headers=proxyHeaders) as response:
                     response.raise_for_status()
-                    async with aiofiles.open(filePath, 'wb') as out_file:
-                        async for chunk in response.content.iter_chunked(chunk_size):
-                            await out_file.write(chunk)
-                return filePath
+                    content = await response.read()
+                    fileName = ContentTypeSniffer.fileNameFromDisposition(response.headers.get("Content-Disposition")) or fallbackFileName
+                    contentType = self._resolvedContentType(response, content, fileName)
+                    return FetchedDocument(content=content, contentType=contentType, url=str(response.url), fileName=fileName)
             except Exception as e:
                 lastError = e
                 if self._proxies:
@@ -215,6 +191,44 @@ class AioHttpClient(IHttpClient):
                     self.logger.warning(f"🟡 Error en descarga, intento {attempt}/{maxRetries}, reintentando: {e}")
 
         raise RuntimeError(f"Descarga fallida tras {maxRetries} intentos - {url}: {lastError}")
+
+    async def fetchDocument(self, imagenUrl: str) -> Optional[FetchedDocument]:
+        """GET a la URL 'imagen?g=<hash>' de Ekogui. Puede devolver dos cosas:
+        (a) el archivo binario final directo (PDF/imagen/word), o
+        (b) una pagina HTML intermedia con un <embed src='...temporales\\<archivo>.pdf'>
+            que hay que seguir para obtener el archivo real.
+        Antes este metodo asumia siempre (b) y hacia await response.text(),
+        lo que explota con UnicodeDecodeError cuando en realidad vino (a).
+        Ahora se revisa el Content-Type real antes de decidir como leerlo."""
+        proxy = self._currentProxy()
+        proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
+        async with self.session.get(imagenUrl, proxy=proxy, proxy_headers=proxyHeaders) as response:
+            finalUrl = str(response.url)
+            if "ControlDoc/Error.jsp" in finalUrl:
+                return None
+
+            response.raise_for_status()
+            content = await response.read()
+            fileName = ContentTypeSniffer.fileNameFromDisposition(response.headers.get("Content-Disposition"))
+            contentType = self._resolvedContentType(response, content, fileName)
+
+            if contentType != "text/html":
+                return FetchedDocument(content=content, contentType=contentType, url=finalUrl, fileName=fileName)
+
+            html = content.decode("utf-8", errors="replace")
+
+        match = re.search(r"temporales[\\/]([^'\"]+)", html)
+        if not match or not match.group(1) or match.group(1) == ".pdf":
+            snippet = html[:300].replace("\n", " ").replace("\r", "")
+            raise RuntimeError(
+                f"No se encontro un archivo temporal valido en la respuesta de {imagenUrl} "
+                f"(url_final={finalUrl} body={snippet!r})"
+            )
+        fileName = match.group(1)
+
+        parsed = urlparse(imagenUrl)
+        realUrl = f"{parsed.scheme}://{parsed.netloc}/mercurio/imagenesapp/temporales/{fileName}"
+        return await self._fetchBinary(realUrl, fallbackFileName=fileName)
 
     async def close(self):
         if self.session:

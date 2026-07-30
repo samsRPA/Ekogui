@@ -1,24 +1,28 @@
 from datetime import date
+from pathlib import Path
 import json
 import logging
+import os
 import uuid
 
 from app.domain.interfaces.IHttpClient import IHttpClient
 from app.domain.interfaces.IS3Manager import IS3Manager
 from app.domain.interfaces.IDatabase import IDatabase
 from app.domain.interfaces.IAutosDownloaderService import IAutosDownloaderService
+from app.domain.interfaces.IProcessorFactory import IProcessorFactory
 from app.infrastructure.database.repositories.CAutoRamaRep import CAutoRamaRep
 from app.infrastructure.filesystem.TempWorkspace import TempWorkspace
 from app.application.dto.AutoQueueMessage import AutoQueueMessage, AutoItem
 
 
 class AutosDownloaderService(IAutosDownloaderService):
-    def __init__(self, httpClient: IHttpClient, tempWorkspace: TempWorkspace, db: IDatabase, s3Manager: IS3Manager, cAutoRamaRep: CAutoRamaRep):
+    def __init__(self, httpClient: IHttpClient, tempWorkspace: TempWorkspace, db: IDatabase, s3Manager: IS3Manager, cAutoRamaRep: CAutoRamaRep, processorFactory: IProcessorFactory):
         self.httpClient = httpClient
         self.tempWorkspace = tempWorkspace
         self.db = db
         self.s3Manager = s3Manager
         self.cAutoRamaRep = cAutoRamaRep
+        self.processorFactory = processorFactory
         self.logger = logging.getLogger(__name__)
 
     async def handleMessage(self, body: bytes) -> None:
@@ -53,8 +57,8 @@ class AutosDownloaderService(IAutosDownloaderService):
                         stats["omitidosPorUrl"] += 1
                         continue
 
-                    urlFinal = await self.httpClient.resolveFinalUrl(auto.urlAuto)
-                    if urlFinal is None:
+                    fetched = await self.httpClient.fetchDocument(auto.urlAuto)
+                    if fetched is None:
                         stats["omitidosPorNoDisponible"] += 1
                         self.logger.warning(
                             f"🟡 Documento no disponible en Ekogui (sin permiso o no existe) - "
@@ -62,48 +66,41 @@ class AutosDownloaderService(IAutosDownloaderService):
                         )
                         continue
 
-                    tempFileName = f"tmp_{uuid.uuid4().hex}.pdf"
-                    filePath = outputDir / tempFileName
-                    await self.httpClient.downloadToFile(urlFinal, str(filePath))
+                    processor = await self.processorFactory.getProcessor(fetched.contentType, fetched.fileName, auto.urlAuto)
 
-                    if not self.tempWorkspace.isValidPdf(filePath):
+                    fetchedExt = os.path.splitext(fetched.fileName)[1] if fetched.fileName else ""
+                    tempFileName = f"tmp_{uuid.uuid4().hex}{fetchedExt}"
+                    rawFilePath = await processor.saveRawFile(fetched.content, tempFileName, outputDir)
+                    pdfPaths = await processor.toPdf(rawFilePath)
+
+                    if not pdfPaths:
+                        # Un comprimido sin ningun archivo soportado adentro
+                        # (o vacio) no cuenta como error: no hay nada que subir.
                         stats["omitidosPorPdfInvalido"] += 1
                         self.logger.warning(
-                            f"🟡 PDF invalido descartado - radicacion={message.radicacion} fecha={auto.fechaAuto} "
-                            f"url={auto.urlAuto}"
+                            f"🟡 Sin documentos convertibles - radicacion={message.radicacion} "
+                            f"fecha={auto.fechaAuto} url={auto.urlAuto}"
                         )
                         continue
 
-                    fileHash = self.tempWorkspace.hashFile(filePath)
-                    if not fileHash:
-                        stats["omitidosPorHash"] += 1
-                        continue
-
-                    if fileHash in seenHashes:
-                        stats["omitidosPorHash"] += 1
-                        continue
-
-                    if await self.cAutoRamaRep.existsByHash(conn, auto.fechaAuto, message.radicacion, fileHash, message.origen):
-                        stats["omitidosPorHash"] += 1
-                        continue
-
-                    seenHashes.add(fileHash)
-
-                    formattedDate = auto.fechaAuto.strftime("%d-%m-%Y")
-                    maxConsecutive = await self.getMaxConsecutive(conn, auto.fechaAuto, message.radicacion, message.origen, consecutiveMap, formattedDate)
-
-                    routeS3 = f"{formattedDate}_{message.radicacion}_{maxConsecutive}"
-                    filename = f"{routeS3}.pdf"
-                    filePath = filePath.rename(outputDir / filename)
-
-                    uploaded = await self.s3Manager.uploadFile(filePath)
-                    if not uploaded:
-                        stats["errores"] += 1
-                        continue
-
-                    urlHashAuto = f"{auto.urlAuto}|{fileHash}"
-                    if await self.cAutoRamaRep.addAutoRecord(conn, auto.fechaAuto, message.radicacion, routeS3, urlHashAuto, maxConsecutive, message.origen):
-                        stats["insertados"] += 1
+                    # Un comprimido puede producir varios PDF (uno por cada
+                    # archivo soportado adentro, en cualquier subcarpeta). El
+                    # comprimido en si nunca se sube ni recibe consecutivo,
+                    # solo cada PDF resultante -> mismo radicado y fecha del
+                    # auto, cada uno con su propio consecutivo.
+                    isFromCompressed = len(pdfPaths) > 1
+                    for pdfPath in pdfPaths:
+                        pdfPath = Path(pdfPath)
+                        # Si viene de un comprimido, el nombre original del
+                        # archivo interno se agrega a la URL guardada para
+                        # que nunca quede identica a la del zip padre: si no,
+                        # checkAutoExist (que compara la URL exacta) daria
+                        # falso-positivo con solo UN archivo insertado y
+                        # descartaria el auto completo en un reproceso,
+                        # perdiendo los archivos restantes del zip para siempre.
+                        childId = pdfPath.stem if isFromCompressed else None
+                        await self._storeConvertedPdf(conn, message, auto, outputDir, pdfPath, consecutiveMap, seenHashes, stats, childId
+                        )
                 except Exception as e:
                     stats["errores"] += 1
                     self.logger.error(
@@ -127,6 +124,53 @@ class AutosDownloaderService(IAutosDownloaderService):
             if conn:
                 await self.db.releaseConnection(conn)
 
+
+    async def _storeConvertedPdf(self, conn, message: AutoQueueMessage, auto: AutoItem, outputDir, filePath: Path,
+                                  consecutiveMap: dict, seenHashes: set, stats: dict, childId: str = None) -> None:
+        """Valida, deduplica, sube a S3 y registra en BD un PDF ya
+        convertido. Se llama una vez por cada PDF resultante de un auto:
+        normalmente uno, pero un comprimido produce uno por cada archivo
+        soportado que traiga adentro -> cada uno conserva el radicado y la
+        fecha del auto, pero recibe su propio consecutivo."""
+        if not self.tempWorkspace.isValidPdf(filePath):
+            stats["omitidosPorPdfInvalido"] += 1
+            self.logger.warning(
+                f"🟡 PDF invalido descartado - radicacion={message.radicacion} fecha={auto.fechaAuto} "
+                f"url={auto.urlAuto} archivo={filePath.name}"
+            )
+            return
+
+        fileHash = self.tempWorkspace.hashFile(filePath)
+        if not fileHash:
+            stats["omitidosPorHash"] += 1
+            return
+
+        if fileHash in seenHashes:
+            stats["omitidosPorHash"] += 1
+            return
+
+        if await self.cAutoRamaRep.existsByHash(conn, auto.fechaAuto, message.radicacion, fileHash, message.origen):
+            stats["omitidosPorHash"] += 1
+            return
+
+        seenHashes.add(fileHash)
+
+        formattedDate = auto.fechaAuto.strftime("%d-%m-%Y")
+        maxConsecutive = await self.getMaxConsecutive(conn, auto.fechaAuto, message.radicacion, message.origen, consecutiveMap, formattedDate)
+
+        routeS3 = f"{formattedDate}_{message.radicacion}_{maxConsecutive}"
+        filename = f"{routeS3}.pdf"
+        finalPath = filePath.rename(outputDir / filename)
+
+        uploaded = await self.s3Manager.uploadFile(finalPath)
+        if not uploaded:
+            stats["errores"] += 1
+            return
+
+        autoUrl = f"{auto.urlAuto}#{childId}" if childId else auto.urlAuto
+        urlHashAuto = f"{autoUrl}|{fileHash}"
+        if await self.cAutoRamaRep.addAutoRecord(conn, auto.fechaAuto, message.radicacion, routeS3, urlHashAuto, maxConsecutive, message.origen):
+            stats["insertados"] += 1
 
     async def getMaxConsecutive(self, conn, autoDate: date, radicado: str, origin: str, consecutiveMap, formattedDate):
         try:

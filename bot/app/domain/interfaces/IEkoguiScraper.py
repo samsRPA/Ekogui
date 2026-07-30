@@ -31,9 +31,14 @@ class IEkoguiScraper(ABC):
 
     @abstractmethod
     async def obtenerUrlDocumento(self, client: IContextClient, idToken: str,
-                                   procesoId: int, archivoId: int) -> str:
+                                   procesoId: int, archivoId: int,
+                                   maxRetries: int = 3, backoffSeconds: float = 2.0) -> str:
         """Retorna la URL 'imagen?g=<hash>' del documento. A diferencia de la
         URL final 'temporales/<archivo>.pdf' (que el SGD genera al vuelo y
         expira), esta URL con hash es estable y se puede publicar en la cola
-        de 'autos' para que el consumidor la descargue directamente."""
+        de 'autos' para que el consumidor la descargue directamente.
+        Reintenta con backoff si el gateway Zuul responde con un 500
+        transitorio (SHORTCIRCUIT/GENERAL). Lanza una excepcion si tras los
+        reintentos no se obtuvo una URL http(s) valida -> el llamador debe
+        omitir ese documento sin publicarlo."""
         ...
