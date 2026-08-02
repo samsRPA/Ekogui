@@ -3,6 +3,17 @@ from abc import ABC, abstractmethod
 from app.domain.interfaces.IContextClient import IContextClient
 
 
+class SesionExpiradaError(RuntimeError):
+    """El gateway respondio 403 a una llamada autenticada de /ekoguims: el
+    idToken de la sesion (obtenido una sola vez por lote en
+    iniciarSesionEntidad) expiro a mitad de un lote largo. El llamador puede
+    refrescar la sesion con iniciarSesionEntidad() y reintentar."""
+
+    def __init__(self, message: str, status: int = 403):
+        super().__init__(message)
+        self.status = status
+
+
 class IEkoguiScraper(ABC):
     """Scraper de Ekogui para el consumidor: recibe un lote de procesos de
     UNA entidad (ya resuelta por el productor) y abre una sola sesion

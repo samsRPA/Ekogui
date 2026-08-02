@@ -48,7 +48,7 @@ services:
       image: bot:latest
       # container_name: bot
       deploy:
-        replicas: 5
+        replicas: 10
         restart_policy:
           condition: on-failure
         resources:
@@ -78,7 +78,7 @@ services:
       image: downloader_autos:latest
       # container_name: downloader_autos
       deploy:
-        replicas: 5
+        replicas: 15
         restart_policy:
           condition: on-failure
         resources:

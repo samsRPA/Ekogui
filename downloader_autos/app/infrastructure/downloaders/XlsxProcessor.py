@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import warnings
@@ -14,6 +15,7 @@ from app.domain.interfaces.IFileProcessor import IFileProcessor
 
 class XlsxProcessor(IFileProcessor):
     DEFAULT_EXT = ".xlsx"
+    CONVERT_TIMEOUT_SECONDS = 120
 
     def _formatPdfDate(self, dt: datetime | None) -> str:
         if not dt:
@@ -84,13 +86,21 @@ class XlsxProcessor(IFileProcessor):
         # anchos de columna) antes de convertir.
         metadata = self._extractMetadata(rawFilePath)
 
-        result = subprocess.run([
-            "libreoffice",
-            "--headless",
-            "--convert-to", "pdf",
-            "--outdir", outputDir,
-            rawFilePath
-        ], capture_output=True, text=True)
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: subprocess.run([
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", outputDir,
+                    rawFilePath
+                ], capture_output=True, text=True, timeout=self.CONVERT_TIMEOUT_SECONDS)
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"🔴 Conversion de Excel a PDF colgada, timeout tras {self.CONVERT_TIMEOUT_SECONDS}s: {rawFilePath}"
+            )
 
         if result.returncode != 0:
             raise RuntimeError(f"🔴 Error al convertir Excel a PDF:\n{result.stderr}")

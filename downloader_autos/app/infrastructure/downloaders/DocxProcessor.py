@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 from datetime import datetime
@@ -11,6 +12,7 @@ from app.domain.interfaces.IFileProcessor import IFileProcessor
 
 class DocxProcessor(IFileProcessor):
     DEFAULT_EXT = ".docx"
+    CONVERT_TIMEOUT_SECONDS = 120
 
     def _formatPdfDate(self, dt: datetime | None) -> str:
         if not dt:
@@ -71,13 +73,21 @@ class DocxProcessor(IFileProcessor):
         baseName = os.path.splitext(os.path.basename(rawFilePath))[0]
         pdfPath = os.path.join(outputDir, f"{baseName}.pdf")
 
-        result = subprocess.run([
-            "libreoffice",
-            "--headless",
-            "--convert-to", "pdf",
-            "--outdir", outputDir,
-            rawFilePath
-        ], capture_output=True, text=True)
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: subprocess.run([
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", outputDir,
+                    rawFilePath
+                ], capture_output=True, text=True, timeout=self.CONVERT_TIMEOUT_SECONDS)
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"🔴 Conversion de Word a PDF colgada, timeout tras {self.CONVERT_TIMEOUT_SECONDS}s: {rawFilePath}"
+            )
 
         if result.returncode != 0:
             raise RuntimeError(f"🔴 Error al convertir Word a PDF:\n{result.stderr}")

@@ -9,16 +9,9 @@ from typing import Optional
 
 from app.application.headers.EkoguiHeaders import EkoguiHeaders
 from app.domain.interfaces.IContextClient import IContextClient
-from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
+from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper, SesionExpiradaError
 
 CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
-
-# El gateway Zuul de Ekogui a veces corta la peticion con un 500 cuando el
-# backend/SGD esta lento o caido, y devuelve un cuerpo JSON de error en vez
-# de la URL esperada. Es transitorio: reintentar con backoff normalmente
-# resuelve. Si se propagara tal cual, ese JSON terminaria publicado como
-# 'urlAuto' en la cola de autos.
-_ZUUL_ERROR_RE = re.compile(r'"exception"\s*:\s*"com\.netflix\.zuul\.exception\.ZuulException"')
 
 
 class EkoguiScraper(IEkoguiScraper):
@@ -302,7 +295,20 @@ class EkoguiScraper(IEkoguiScraper):
         }
         resp = await client.get(url, headers=headers)
         self._refreshMsXsrf(resp)
+        if resp.status == 403:
+            raise SesionExpiradaError(
+                f"Sesion expirada listando documentos de procesoId={procesoId} (status=403)"
+            )
         documentos = await resp.json(content_type=None)
+        if not isinstance(documentos, list) or not all(isinstance(d, dict) for d in documentos):
+            # Defensa adicional: si el 403 de arriba no cubrio el caso (otro
+            # motivo por el que la API no devuelve la lista esperada), que
+            # explote aca con un mensaje claro en vez de mas adelante como un
+            # AttributeError confuso al iterar caracter por caracter un str.
+            raise RuntimeError(
+                f"Respuesta inesperada listando documentos de procesoId={procesoId} "
+                f"(status={resp.status}): {str(documentos)[:300]!r}"
+            )
         return documentos
 
     async def obtenerUrlDocumento(self, client: IContextClient, idToken: str,
@@ -311,7 +317,7 @@ class EkoguiScraper(IEkoguiScraper):
         """GET .../ekoguimstransversales/api/documento-soporte/obtenerURLDocumentoSoporte/{procesoId}/{archivoId}
         -> URL de texto plano (https://sgdea.../mercurio/consulta/imagen?g=<hash>)
         que hay que visitar para que el SGD genere el archivo temporal
-        descargable. Si el gateway Zuul devuelve un 500 SHORTCIRCUIT/GENERAL
+        descargable. Si el backend/gateway devuelve cualquier 5xx
         (backend/SGD lento o caido), reintenta con backoff antes de
         rendirse. Nunca retorna un cuerpo que no sea una URL http(s) real
         -> evita publicar basura como 'urlAuto' en la cola de autos."""
@@ -337,15 +343,26 @@ class EkoguiScraper(IEkoguiScraper):
             if resp.status == 200 and body.lower().startswith(("http://", "https://")):
                 return body
 
-            if resp.status >= 500 and _ZUUL_ERROR_RE.search(body) and attempt < maxRetries:
+            if resp.status >= 500 and attempt < maxRetries:
+                # Cualquier 5xx del backend/gateway es transitorio (Zuul
+                # SHORTCIRCUIT/GENERAL es una forma, pero tambien aparece un
+                # error.internalServerError generico con el mismo status);
+                # se reintenta con backoff sin depender de la forma exacta
+                # del body.
                 wait = backoffSeconds * attempt
                 self.logger.warning(
-                    f"🟡 Zuul devolvio error transitorio (status={resp.status}) al resolver URL de "
+                    f"🟡 Error transitorio del backend (status={resp.status}) al resolver URL de "
                     f"procesoId={procesoId} archivoId={archivoId}; reintentando en {wait}s "
                     f"(intento {attempt}/{maxRetries})"
                 )
                 await asyncio.sleep(wait)
                 continue
+
+            if resp.status == 403:
+                raise SesionExpiradaError(
+                    f"Sesion expirada resolviendo URL de documento (procesoId={procesoId} "
+                    f"archivoId={archivoId})"
+                )
 
             raise RuntimeError(
                 f"Respuesta invalida al resolver URL de documento (status={resp.status} "

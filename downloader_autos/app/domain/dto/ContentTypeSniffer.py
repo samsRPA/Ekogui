@@ -92,6 +92,17 @@ class ContentTypeSniffer:
         return (contentType or "").strip().lower() in cls.UNRELIABLE_CONTENT_TYPES
 
     @classmethod
+    def byExtension(cls, fileName: Optional[str]) -> Optional[str]:
+        """Ultimo fallback cuando ni el Content-Type declarado ni la firma
+        binaria (sniffContentType) permiten identificar el archivo: se usa
+        la extension del nombre real (Content-Disposition o el archivo bajo
+        temporales/) contra el mismo mapa de forLocalFile."""
+        if not fileName:
+            return None
+        ext = os.path.splitext(fileName)[1].lower()
+        return cls._EXTENSION_CONTENT_TYPES.get(ext)
+
+    @classmethod
     def refineByExtension(cls, contentType: str, fileName: Optional[str]) -> str:
         """PK\\x03\\x04 y el header OLE2 son ambiguos entre varios formatos
         (zip/docx/xlsx y doc/xls respectivamente). Si el sniff cayo en el

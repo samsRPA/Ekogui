@@ -4,7 +4,7 @@ import logging
 from app.application.dto.AutoDto import AutoDto, AutoItemDto
 from app.application.dto.ActuacionDto import ActuacionDto
 from app.application.dto.EkoguiReq import EkoguiReq, ProcesoItem
-from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
+from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper, SesionExpiradaError
 from app.domain.interfaces.IHttpClient import IHttpClient
 from app.domain.interfaces.IScraperService import IScraperService
 from app.domain.interfaces.IBrokerProducer import IBrokerProducer
@@ -57,7 +57,7 @@ class ScraperService(IScraperService):
         totalActuaciones = 0
         for proceso in data.procesos:
             try:
-                documentosCount, actuacionesCount = await self._processProceso(proceso, client, idToken)
+                documentosCount, actuacionesCount, idToken = await self._processProceso(proceso, client, idToken)
                 totalDocumentos += documentosCount
                 totalActuaciones += actuacionesCount
             except Exception:
@@ -204,16 +204,34 @@ class ScraperService(IScraperService):
 
         return publicadas
 
-    async def _processProceso(self, proceso: ProcesoItem, client, idToken: str) -> tuple[int, int]:
-        documentos = await self.scraper.listarDocumentosProceso(client, idToken, proceso.procesoId)
+    async def _refrescarSesion(self, client, proceso: ProcesoItem) -> str:
+        """El idToken se obtiene una sola vez por lote (en _process) y puede
+        expirar a mitad de un lote largo, manifestandose como 403 en
+        cualquier llamada de /ekoguims. Reinicia sesion+SSO+seleccion de
+        entidad para poder seguir procesando el resto del lote sin perder
+        el trabajo ya avanzado."""
+        self.logger.warning(
+            f"🟡 Sesion expirada (403) a mitad de lote entidadId={proceso.entidadId} "
+            f"({proceso.entidadNombre}); reiniciando sesion para continuar con el resto del lote"
+        )
+        return await self.scraper.iniciarSesionEntidad(client, proceso.entidadId)
+
+    async def _processProceso(self, proceso: ProcesoItem, client, idToken: str) -> tuple[int, int, str]:
+        try:
+            documentos = await self.scraper.listarDocumentosProceso(client, idToken, proceso.procesoId)
+        except SesionExpiradaError:
+            idToken = await self._refrescarSesion(client, proceso)
+            documentos = await self.scraper.listarDocumentosProceso(client, idToken, proceso.procesoId)
+
         if not documentos:
             self.logger.warning(
                 f"🟡 radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}) sin documentos; se omite."
             )
-            return 0, 0
+            return 0, 0, idToken
 
         autos: list[AutoItemDto] = []
         actuaciones: list[ActuacionDto] = []
+        sesionYaRefrescada = False
         for doc in documentos:
             archivoId = doc.get("archivoId")
             if not doc.get("archivoIdSgd"):
@@ -223,7 +241,14 @@ class ScraperService(IScraperService):
                 )
                 continue
             try:
-                imagenUrl = await self.scraper.obtenerUrlDocumento(client, idToken, proceso.procesoId, archivoId)
+                try:
+                    imagenUrl = await self.scraper.obtenerUrlDocumento(client, idToken, proceso.procesoId, archivoId)
+                except SesionExpiradaError:
+                    if sesionYaRefrescada:
+                        raise
+                    idToken = await self._refrescarSesion(client, proceso)
+                    sesionYaRefrescada = True
+                    imagenUrl = await self.scraper.obtenerUrlDocumento(client, idToken, proceso.procesoId, archivoId)
                 autos.append(self._buildAutoItemDto(doc, imagenUrl))
                 actuaciones.append(self._buildActuacionDto(proceso, doc))
             except Exception:
@@ -237,7 +262,7 @@ class ScraperService(IScraperService):
                 f"🟡 radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}) tenia "
                 f"{len(documentos)} documento(s) pero ninguno quedo disponible para publicar."
             )
-            return len(documentos), 0
+            return len(documentos), 0, idToken
 
         actuacionesPublicadas = await self._publishActuaciones(actuaciones)
         autosPublicados = await self._publishAutos(proceso, autos)
@@ -247,5 +272,5 @@ class ScraperService(IScraperService):
             f"{autosPublicados}/{len(autos)} url(s) de documento publicadas"
         )
 
-        return len(documentos), actuacionesPublicadas
+        return len(documentos), actuacionesPublicadas, idToken
 

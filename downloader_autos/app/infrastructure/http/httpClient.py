@@ -42,6 +42,14 @@ class AioHttpClient(IHttpClient):
         self._index = (self._index + 1) % len(self._proxies)
         self._sessionId = uuid.uuid4().hex
 
+    def _describeError(self, e: BaseException) -> str:
+        """str(e) viene vacio en excepciones como asyncio.TimeoutError() o
+        CancelledError() creadas sin mensaje, dejando logs del tipo
+        'fallo: ' sin ninguna pista de la causa real. Siempre antepone el
+        tipo de la excepcion."""
+        text = str(e)
+        return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
     async def init(self):
         try:
             timeout = ClientTimeout(
@@ -168,9 +176,16 @@ class AioHttpClient(IHttpClient):
         declared = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if ContentTypeSniffer.isUnreliable(declared):
             declared = ContentTypeSniffer.sniffContentType(content) or declared
-        return ContentTypeSniffer.refineByExtension(declared, fileName)
+        resolved = ContentTypeSniffer.refineByExtension(declared, fileName)
+        if ContentTypeSniffer.isUnreliable(resolved):
+            # Ni el header ni la firma binaria lo resolvieron (ej. un .docx
+            # cuyo cuerpo no calzo con la firma zip esperada); como ultimo
+            # recurso se usa la extension del nombre real del archivo.
+            resolved = ContentTypeSniffer.byExtension(fileName) or resolved
+        return resolved
 
-    async def _fetchBinary(self, url: str, fallbackFileName: Optional[str] = None, maxRetries: int = 2) -> FetchedDocument:
+    async def _fetchBinary(self, url: str, fallbackFileName: Optional[str] = None, maxRetries: int = 2,
+                            backoffSeconds: float = 1.5) -> FetchedDocument:
         lastError = None
         for attempt in range(1, maxRetries + 1):
             proxy = self._currentProxy()
@@ -179,43 +194,85 @@ class AioHttpClient(IHttpClient):
                 async with self.session.get(url, proxy=proxy, proxy_headers=proxyHeaders) as response:
                     response.raise_for_status()
                     content = await response.read()
+                    if not content:
+                        # SGDEA a veces responde 200 con cuerpo vacio cuando el
+                        # archivo temporal aun no termino de generarse; se
+                        # trata igual que un fallo para que reintente con
+                        # backoff en vez de guardarlo vacio a disco.
+                        raise RuntimeError("Respuesta vacia (0 bytes)")
                     fileName = ContentTypeSniffer.fileNameFromDisposition(response.headers.get("Content-Disposition")) or fallbackFileName
                     contentType = self._resolvedContentType(response, content, fileName)
                     return FetchedDocument(content=content, contentType=contentType, url=str(response.url), fileName=fileName)
             except Exception as e:
                 lastError = e
                 if self._proxies:
-                    self.logger.warning(f"🟡 Error en descarga, intento {attempt}/{maxRetries}, rotando proxy: {e}")
+                    self.logger.warning(f"🟡 Error en descarga, intento {attempt}/{maxRetries}, rotando proxy: {self._describeError(e)}")
                     self._advance(failed=True)
                 else:
-                    self.logger.warning(f"🟡 Error en descarga, intento {attempt}/{maxRetries}, reintentando: {e}")
+                    self.logger.warning(f"🟡 Error en descarga, intento {attempt}/{maxRetries}, reintentando: {self._describeError(e)}")
+                if attempt < maxRetries:
+                    # El archivo temporal de SGDEA puede tardar un instante en
+                    # materializarse; reintentar al instante (como antes)
+                    # repite el mismo 404/vacio. Se espera con backoff
+                    # creciente antes del siguiente intento.
+                    await asyncio.sleep(backoffSeconds * attempt)
 
-        raise RuntimeError(f"Descarga fallida tras {maxRetries} intentos - {url}: {lastError}")
+        raise RuntimeError(f"Descarga fallida tras {maxRetries} intentos - {url}: {self._describeError(lastError)}")
 
-    async def fetchDocument(self, imagenUrl: str) -> Optional[FetchedDocument]:
+    async def fetchDocument(self, imagenUrl: str, maxRetries: int = 2, backoffSeconds: float = 1.5) -> Optional[FetchedDocument]:
         """GET a la URL 'imagen?g=<hash>' de Ekogui. Puede devolver dos cosas:
         (a) el archivo binario final directo (PDF/imagen/word), o
         (b) una pagina HTML intermedia con un <embed src='...temporales\\<archivo>.pdf'>
             que hay que seguir para obtener el archivo real.
         Antes este metodo asumia siempre (b) y hacia await response.text(),
         lo que explota con UnicodeDecodeError cuando en realidad vino (a).
-        Ahora se revisa el Content-Type real antes de decidir como leerlo."""
-        proxy = self._currentProxy()
-        proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
-        async with self.session.get(imagenUrl, proxy=proxy, proxy_headers=proxyHeaders) as response:
-            finalUrl = str(response.url)
-            if "ControlDoc/Error.jsp" in finalUrl:
-                return None
+        Ahora se revisa el Content-Type real antes de decidir como leerlo.
+        En el caso (a), un cuerpo vacio se trata como el mismo fallo
+        transitorio de SGDEA que en (b)/_fetchBinary: se reintenta con
+        backoff antes de rendirse, en vez de devolverlo como valido."""
+        # Status 502/503/504: el gateway de Ekogui falla de forma transitoria
+        # (backend/SGD lento o caido); se reintenta con backoff igual que el
+        # caso de cuerpo vacio. Otros status (403, 404, etc.) no son
+        # transitorios y se propagan de inmediato, sin reintentar.
+        RETRYABLE_STATUS = {502, 503, 504}
 
-            response.raise_for_status()
-            content = await response.read()
-            fileName = ContentTypeSniffer.fileNameFromDisposition(response.headers.get("Content-Disposition"))
-            contentType = self._resolvedContentType(response, content, fileName)
+        html = None
+        finalUrl = None
+        for attempt in range(1, maxRetries + 1):
+            proxy = self._currentProxy()
+            proxyHeaders = self._proxyHeaders(uuid.uuid4().hex)
+            try:
+                async with self.session.get(imagenUrl, proxy=proxy, proxy_headers=proxyHeaders) as response:
+                    finalUrl = str(response.url)
+                    if "ControlDoc/Error.jsp" in finalUrl:
+                        return None
 
-            if contentType != "text/html":
-                return FetchedDocument(content=content, contentType=contentType, url=finalUrl, fileName=fileName)
+                    response.raise_for_status()
+                    content = await response.read()
+                    fileName = ContentTypeSniffer.fileNameFromDisposition(response.headers.get("Content-Disposition"))
+                    contentType = self._resolvedContentType(response, content, fileName)
 
-            html = content.decode("utf-8", errors="replace")
+                    if contentType != "text/html":
+                        if content:
+                            return FetchedDocument(content=content, contentType=contentType, url=finalUrl, fileName=fileName)
+                        if attempt < maxRetries:
+                            self.logger.warning(
+                                f"🟡 Respuesta vacia al pedir {imagenUrl}, intento {attempt}/{maxRetries}, reintentando"
+                            )
+                            await asyncio.sleep(backoffSeconds * attempt)
+                            continue
+                        raise RuntimeError(f"Respuesta vacia (0 bytes) al pedir {imagenUrl} tras {maxRetries} intentos")
+
+                    html = content.decode("utf-8", errors="replace")
+            except aiohttp.ClientResponseError as e:
+                if e.status not in RETRYABLE_STATUS or attempt >= maxRetries:
+                    raise
+                self.logger.warning(
+                    f"🟡 {e.status} transitorio al pedir {imagenUrl}, intento {attempt}/{maxRetries}, reintentando"
+                )
+                await asyncio.sleep(backoffSeconds * attempt)
+                continue
+            break
 
         match = re.search(r"temporales[\\/]([^'\"]+)", html)
         if not match or not match.group(1) or match.group(1) == ".pdf":
