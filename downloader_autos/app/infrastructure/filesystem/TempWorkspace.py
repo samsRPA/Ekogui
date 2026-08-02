@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Iterator
 from contextlib import contextmanager
 
+import fitz
+
 class TempWorkspace:
     def __init__(self, basePath: Path) -> None:
         self.basePath = basePath
@@ -18,13 +20,18 @@ class TempWorkspace:
         return sha256.hexdigest()
 
     def isValidPdf(self, filePath: Path) -> bool:
-        """Valida que el archivo descargado sea realmente un PDF (empieza
-        con el magic header '%PDF-'). Ekogui a veces responde con una
-        pagina HTML intermedia en vez del PDF; esto evita subir esa basura
-        a S3 disfrazada de '.pdf'."""
+        """Valida que el archivo descargado sea realmente un PDF abrible y
+        con al menos una pagina. Ekogui a veces responde con una pagina
+        HTML intermedia en vez del PDF; esto evita subir esa basura a S3
+        disfrazada de '.pdf'.
+        Se usa fitz en vez de solo chequear el magic header '%PDF-' en el
+        byte 0: algunos PDF validos traen bytes delante (BOM, salto de
+        linea, metadata del generador) que un chequeo de posicion fija
+        rechazaria como invalidos aunque el archivo abra perfecto en
+        cualquier lector."""
         try:
-            with open(filePath, "rb") as f:
-                return f.read(5) == b"%PDF-"
+            with fitz.open(filePath) as doc:
+                return doc.page_count > 0
         except Exception:
             return False
 
