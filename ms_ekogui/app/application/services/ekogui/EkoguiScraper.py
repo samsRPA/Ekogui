@@ -11,6 +11,12 @@ from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
 
 CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
 
+# Tamano fijo de pagina al listar procesos. Entidades con muchos procesos
+# (ej. ACOPENSIONES) hacen que el backend de Ekogui tarde demasiado en
+# construir una pagina con size=totalElements y el cliente termina en
+# TimeoutError; pedir en bloques fijos evita ese problema.
+LISTADO_PAGE_SIZE = 10000
+
 
 class EkoguiScraper(IEkoguiScraper):
     """Scraper de Ekogui (etapa de listado): login completo (SP Angular ->
@@ -217,7 +223,7 @@ class EkoguiScraper(IEkoguiScraper):
             self.logger.warning(f"🟡 entidadId={entidadId} ({entidadNombre}) sin procesos en estado={estado}")
             return []
 
-        pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=0, size=totalElements)
+        pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=0, size=LISTADO_PAGE_SIZE)
         nuevos = pagina.get("content", [])
         procesos = list(nuevos)
         totalPages = pagina.get("totalPages", 1)
@@ -227,7 +233,7 @@ class EkoguiScraper(IEkoguiScraper):
 
         page = 1
         while len(procesos) < totalElements and page < totalPages:
-            pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=page, size=totalElements)
+            pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=page, size=LISTADO_PAGE_SIZE)
             nuevos = pagina.get("content", [])
             procesos.extend(nuevos)
             self.logger.info(

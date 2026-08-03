@@ -15,7 +15,7 @@ from app.domain.interfaces.IContextClient import IContextClient
 
 class AioHttpClient(IHttpClient):
     def __init__(self, sslIntermediateCertPath: str, proxies: List[Optional[str]] = None,
-                 maxConnections: int = 20, timeoutSeconds: int = 120):
+                 maxConnections: int = 20, timeoutSeconds: int = 300):
         self._proxies = proxies or []
         self._index: int = 0
         self._sessionId: str = uuid.uuid4().hex
