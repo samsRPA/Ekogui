@@ -38,6 +38,13 @@ class AutosDownloaderService(IAutosDownloaderService):
     def _parseMessage(self, body: bytes) -> AutoQueueMessage:
         return AutoQueueMessage.fromRaw(json.loads(body.decode("utf-8")))
 
+    def _resolveUrlAutoName(self, auto: AutoItem) -> str:
+        """Ultimo respaldo: urlAutoName nunca debe llegar vacio a la BD, sin
+        importar que traiga el mensaje."""
+        if auto.urlAutoName:
+            return auto.urlAutoName
+        return f"{auto.urlAuto}#{auto.namePDF}" if auto.namePDF else auto.urlAuto
+
     async def _processAutos(self, message: AutoQueueMessage, outputDir) -> None:
         conn = None
         try:
@@ -53,7 +60,8 @@ class AutosDownloaderService(IAutosDownloaderService):
             stats = {"insertados": 0,"omitidosPorUrl": 0,"omitidosPorHash": 0,"omitidosPorPdfInvalido": 0,"omitidosPorNoDisponible": 0,"errores": 0}
             for auto in message.autos:
                 try:
-                    if await self.cAutoRamaRep.checkAutoExist(conn, auto.fechaAuto, message.radicacion, auto.urlAutoName, message.origen):
+                    urlAutoName = self._resolveUrlAutoName(auto)
+                    if await self.cAutoRamaRep.checkAutoExist(conn, auto.fechaAuto, message.radicacion, urlAutoName, message.origen):
                         stats["omitidosPorUrl"] += 1
                         continue
 
@@ -93,7 +101,7 @@ class AutosDownloaderService(IAutosDownloaderService):
 
                     if isFromCompressed:
                         await self.cAutoRamaRep.addAutoRecord(
-                            conn, auto.fechaAuto, message.radicacion, None, auto.urlAutoName, None, message.origen,
+                            conn, auto.fechaAuto, message.radicacion, None, urlAutoName, None, message.origen,
                             estadoDescarga="SI", tipoDocumento=fetchedExt.lstrip(".").lower()
                         )
                 except Exception as e:
@@ -140,7 +148,8 @@ class AutosDownloaderService(IAutosDownloaderService):
             stats["omitidosPorHash"] += 1
             return
 
-        autoUrl = f"{auto.urlAutoName}#{childId}" if childId else auto.urlAutoName
+        baseUrlAutoName = self._resolveUrlAutoName(auto)
+        autoUrl = f"{baseUrlAutoName}#{childId}" if childId else baseUrlAutoName
         urlHashAuto = f"{autoUrl}|{fileHash}"
         
         if fileHash in seenHashes:

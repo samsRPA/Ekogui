@@ -7,9 +7,9 @@ from pydantic import BaseModel, field_validator, model_validator
 class AutoItemDto(BaseModel):
     """Un auto/documento individual dentro del lote de un radicado."""
 
-    fechaAuto:       Optional[date] = None
-    urlAuto:         Optional[str] = None
-    namePDF:         Optional[str] = None
+    fechaAuto:  date
+    urlAuto:         str 
+    namePDF:         str 
     urlAutoName:     Optional[str] = None
 
     @model_validator(mode="after")
