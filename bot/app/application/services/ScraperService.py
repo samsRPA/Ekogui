@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 from app.application.dto.AutoDto import AutoDto, AutoItemDto
 from app.application.dto.ActuacionDto import ActuacionDto
@@ -21,6 +22,8 @@ from app.domain.interfaces.IDataBaseService import IDataBaseService
 
 
 class ScraperService(IScraperService):
+
+
     def __init__(self, scraper: IEkoguiScraper, httpClient: IHttpClient,
                  db:IDatabase, dataBaseService:IDataBaseService,  producer:IBrokerProducer,
                  collProducer:IBrokerProducer):
@@ -31,6 +34,7 @@ class ScraperService(IScraperService):
         self.producer = producer
         self.collProducer = collProducer
         self.logger = logging.getLogger(__name__)
+        self.ENTIDAD_COLPENSIONES = "ADMINISTRADORA COLOMBIANA DE PENSIONES"
 
     async def handleMessage(self, body: bytes) -> None:
         try:
@@ -89,6 +93,7 @@ class ScraperService(IScraperService):
         return AutoItemDto(
             fechaAuto=doc.get("fechaRadicado"),
             urlAuto=urlAuto,
+            namePDF=os.path.splitext(doc.get("nombre") or "")[0] or None,
         )
 
     def _buildAutoDto(self, proceso: ProcesoItem, autos: list[AutoItemDto]) -> AutoDto:
@@ -123,7 +128,7 @@ class ScraperService(IScraperService):
                 existe = False
                 if conn:
                     existe = await self.dataBaseService.autoExiste(
-                        conn, proceso.numeroProceso, autoItem.fechaAuto, autoItem.urlAuto
+                        conn, proceso.numeroProceso, autoItem.fechaAuto, autoItem.urlAutoName
                     )
                 if existe:
                     # self.logger.info(
@@ -232,6 +237,7 @@ class ScraperService(IScraperService):
         autos: list[AutoItemDto] = []
         actuaciones: list[ActuacionDto] = []
         sesionYaRefrescada = False
+        omitidosPorEntidad = 0
         for doc in documentos:
             archivoId = doc.get("archivoId")
             if not doc.get("archivoIdSgd"):
@@ -239,6 +245,13 @@ class ScraperService(IScraperService):
                     f"🟡 radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}) archivoId={archivoId} "
                     f"sin archivoIdSgd (no sincronizado con SGD aun) -> se omite."
                 )
+                continue
+            if doc.get("nombreEntidad") != self.ENTIDAD_COLPENSIONES:
+                omitidosPorEntidad += 1
+                # self.logger.warning(
+                #     f"🟡 radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}) archivoId={archivoId} "
+                #     f"nombreEntidad={doc.get('nombreEntidad')!r} distinto de {self.ENTIDAD_COLPENSIONES!r} -> se omite."
+                # )
                 continue
             try:
                 try:
@@ -269,7 +282,8 @@ class ScraperService(IScraperService):
 
         self.logger.info(
             f"📊 radicado={proceso.numeroProceso} -> {actuacionesPublicadas} actuacion(es) publicada(s), "
-            f"{autosPublicados}/{len(autos)} url(s) de documento publicadas"
+            f"{autosPublicados}/{len(autos)} url(s) de documento publicadas, "
+            f"{omitidosPorEntidad} omitido(s) por nombreEntidad distinto de {self.ENTIDAD_COLPENSIONES!r}"
         )
 
         return len(documentos), actuacionesPublicadas, idToken

@@ -136,10 +136,11 @@ Ver endpoints en [API Reference](#api-reference).
 Consumidor de `QUEUE_SCRAPE_NAME` (5 réplicas). Por cada mensaje (`EkoguiReq` = una página de procesos de **una sola entidad**):
 
 1. Abre **una sola sesión** en Ekogui (login + SSO + selección de entidad) y la reutiliza para todos los procesos del lote — no se loguea por cada proceso individual.
-2. Por cada proceso: lista sus documentos de soporte y, por cada documento, resuelve su URL descargable (`obtenerUrlDocumento`). Esta llamada reintenta con backoff si el gateway Zuul de Ekogui responde con un 500 transitorio (`SHORTCIRCUIT`/`GENERAL` — el backend/SGD está lento o caído), y valida que la respuesta sea una URL `http(s)` real antes de usarla, para no publicar basura en la cola si Ekogui falla.
-3. Arma un `ActuacionDto` (evolución procesal) y un `AutoItemDto{fechaAuto, urlAuto}` por documento.
-4. Publica actuaciones a `COLL_QUEUE_NAME` (verificando primero contra `TB_ACTUACIONES_RAMA` que no exista ya) y autos a `AUTOS_QUEUE_NAME` (un mensaje por radicado, con la lista completa de autos nuevos, verificando contra `TB_CONTROL_AUTOS_RAMA`).
-5. Si un proceso o documento individual falla, se loguea y se continúa con el resto del lote — no aborta el mensaje completo.
+2. Por cada proceso: lista sus documentos de soporte y descarta los que no pertenezcan a `ADMINISTRADORA COLOMBIANA DE PENSIONES` (`nombreEntidad` del documento) — solo se procesan autos de Colpensiones, el resto se omite y se cuenta en el resumen del lote (`omitidosPorEntidad`).
+3. Por cada documento que sí aplica: resuelve su URL descargable (`obtenerUrlDocumento`). Esta llamada reintenta con backoff si el gateway Zuul de Ekogui responde con un 500 transitorio (`SHORTCIRCUIT`/`GENERAL` — el backend/SGD está lento o caído), y valida que la respuesta sea una URL `http(s)` real antes de usarla, para no publicar basura en la cola si Ekogui falla.
+4. Arma un `ActuacionDto` (evolución procesal) y un `AutoItemDto{fechaAuto, urlAuto, namePDF, urlAutoName}` por documento. `namePDF` es el nombre original del archivo (sin extensión) y `urlAutoName` (`"{urlAuto}#{namePDF}"`) es la clave que se usa para deduplicar en `bot` y en `downloader_autos`, en vez de la URL cruda — así dos autos con la misma URL de imagen pero distinto nombre de archivo no se pisan entre sí.
+5. Publica actuaciones a `COLL_QUEUE_NAME` (verificando primero contra `TB_ACTUACIONES_RAMA` que no exista ya) y autos a `AUTOS_QUEUE_NAME` (un mensaje por radicado, con la lista completa de autos nuevos, verificando contra `TB_CONTROL_AUTOS_RAMA` por `urlAutoName`).
+6. Si un proceso o documento individual falla, se loguea y se continúa con el resto del lote — no aborta el mensaje completo.
 
 **Payload publicado a `QUEUE_SCRAPE_NAME`** (consumido por `bot`, publicado por `ms_ekogui`):
 
@@ -198,12 +199,14 @@ Consumidor de `COLL_QUEUE_NAME`. A diferencia de los demás bots, no inserta act
 
 Consumidor de `AUTOS_QUEUE_NAME` (5 réplicas). Por cada auto del lote:
 
-- Descarta si ya existe en `TB_CONTROL_AUTOS_RAMA` por URL (`checkAutoExist`).
+- Descarta si ya existe en `TB_CONTROL_AUTOS_RAMA` por `urlAutoName` (`checkAutoExist`).
 - Descarga el documento (`httpClient.fetchDocument`) detectando el tipo real de contenido por `Content-Type`, o por firma binaria si el servidor lo declara vacío/genérico.
+- **Las imágenes (`image/*`) ya no se convierten**: `ProcessorFactory.getProcessor` las reconoce y devuelve `None` en vez de lanzar error de "tipo no soportado" — quedan deshabilitadas a pedido (el `ImageProcessor` y sus entradas en el mapa de `Dependencies.py` quedan comentados, no borrados, para poder reactivarlos).
 - Lo convierte a PDF según su tipo real — ver [tabla de tipos soportados](#tipos-de-archivo-soportados-en-downloader_autos) — **sin tocar su contenido**, solo el contenedor/formato.
-- Calcula SHA-256 del PDF resultante y descarta duplicados (dentro del mismo lote y contra `TB_CONTROL_AUTOS_RAMA`).
+- Calcula SHA-256 del PDF resultante y descarta duplicados (dentro del mismo lote y contra `TB_CONTROL_AUTOS_RAMA`). Un duplicado por hash contra la base ahora también deja registro en `TB_CONTROL_AUTOS_RAMA` (con `estadoDescarga='NO'`), en vez de solo incrementar el contador, para tener rastro de que ese hash ya se evaluó.
 - Renombra a `{fecha}_{radicación}_{consecutivo}.pdf`, sube a S3 (prefijo `S3_PREFIX_AUTOS`) e inserta el registro.
-- Si un ítem falla, se loguea y se continúa con el resto del lote; al final se loguea un resumen (`insertados` / `omitidosPorUrl` / `omitidosPorHash` / `omitidosPorPdfInvalido` / `omitidosPorNoDisponible` / `errores`).
+- Cuando un comprimido produce varios PDF, además de insertar cada archivo interno con su propio consecutivo, ahora se inserta un registro adicional para el **comprimido padre** (`estadoDescarga='SI'`, `tipoDocumento` = extensión real del comprimido) para dejar constancia de que ese zip/rar/7z ya fue procesado.
+- Si un ítem falla, se loguea y se continúa con el resto del lote; al final se loguea un resumen (`insertados` / `omitidosPorUrl` / `omitidosPorHash` / `omitidosPorPdfInvalido` / `omitidosPorNoDisponible` / `errores`) y se hace `commit`.
 
 ---
 
@@ -214,7 +217,7 @@ Consumidor de `AUTOS_QUEUE_NAME` (5 réplicas). Por cada auto del lote:
 | PDF                                            | `PdfProcessor`        | Ninguna, se guarda tal cual                                   |
 | Word (`.doc`/`.docx`/`.docm`)                 | `DocxProcessor`       | LibreOffice headless                                           |
 | Excel (`.xls`/`.xlsx`/`.xlsm`)                 | `XlsxProcessor`       | LibreOffice headless (solo lectura de metadatos, sin reestilar celdas) |
-| Imagen (`png`/`jpg`/`webp`/`gif`/`bmp`/`tiff`) | `ImageProcessor`      | Se envuelve en una página PDF, sin OCR ni reprocesar píxeles   |
+| Imagen (`png`/`jpg`/`webp`/`gif`/`bmp`/`tiff`) | ~~`ImageProcessor`~~ **deshabilitado** | No se procesa: `ProcessorFactory` la omite (no cuenta como error, se salta el ítem) |
 | HTML (o un `.xls` que en realidad es una tabla HTML — quirk conocido de SGDEA) | `HtmlXlsProcessor`    | `wkhtmltopdf`                                                  |
 | Comprimido (`.zip`/`.rar`/`.7z`)               | `CompressedProcessor` | Extracción recursiva (subcarpetas y comprimido-dentro-de-comprimido con tope de profundidad); cada archivo interno soportado se convierte con el procesador que le corresponda |
 
@@ -373,7 +376,8 @@ PROXIES=
 - Docker Engine >= 24
 - Docker Compose V2 (`docker compose`)
 - Archivos `.env` configurados en cada módulo
-- **RabbitMQ** y **Oracle** accesibles desde la red del host — no están definidos como servicios en `docker-compose.yml`, se asumen externos/pre-existentes. El túnel SSH hacia la base de datos es un script standalone (`stack/ssh_tunnel/bd-tunnel.sh`), fuera del stack de Compose.
+- **RabbitMQ** y **Oracle** accesibles desde la red del host — no están definidos como servicios activos en `docker-compose.yml`, se asumen externos/pre-existentes. El túnel SSH hacia la base de datos es un script standalone (`stack/ssh_tunnel/bd-tunnel.sh`), fuera del stack de Compose.
+- `docker-compose.yml` incluye, comentados, dos servicios opcionales (`rabbitmq_ekogui` y `ssh_siugj_nft`) por si se necesita levantar un RabbitMQ local o el túnel SSH como parte del mismo stack en vez de depender de una instancia externa — descomentarlos solo para desarrollo/pruebas puntuales.
 
 ### Levantar el stack
 
@@ -469,6 +473,52 @@ curl -X POST 'http://localhost:8000/api/v1/ekogui/searchCaseNumber' \
     "radicado": "47001310500420240012300",
     "estado": "ACTIVO"
   }'
+```
+
+**Respuesta** (`202 Accepted`):
+
+```json
+{
+  "entidades": [405],
+  "estado": "ACTIVO",
+  "extraidos": 1,
+  "lotesPublicados": 1,
+  "entidadesConError": []
+}
+```
+
+---
+
+### `POST /api/v1/ekogui/searchCaseNumbers`
+
+Publica un job de búsqueda de un **grupo** de radicados dentro de una misma entidad. Reutiliza una sola sesión/login para toda la búsqueda y consulta cada radicado uno por uno (mismo mecanismo que `searchCaseNumber`, `filtroBuscar` con `size=1`) — evita el riesgo de timeout de listar de una sola vez todos los procesos de entidades muy grandes. Los procesos encontrados se publican juntos en un solo lote a `QUEUE_SCRAPE_NAME`.
+
+| Campo        | Tipo       | Requerido | Descripción                                             |
+| ------------- | ----------- | :--------: | ----------------------------------------------------------- |
+| `entidadId`  | `int`      | ✅         | Id de la entidad donde buscar los radicados                 |
+| `radicados`  | `str[]`    | ✅         | Lista de radicados (numeroProceso) a buscar                 |
+| `estado`     | `str`      | ❌ (`PROCESO_ENTIDAD_ACTIVO`) | Estado de los procesos a buscar         |
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/ekogui/searchCaseNumbers' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "entidadId": 405,
+    "radicados": ["47001310500420240012300", "47001310500420240099900"],
+    "estado": "PROCESO_ENTIDAD_ACTIVO"
+  }'
+```
+
+**Respuesta** (`202 Accepted`):
+
+```json
+{
+  "entidadId": 405,
+  "estado": "PROCESO_ENTIDAD_ACTIVO",
+  "extraidos": 1,
+  "lotesPublicados": 1,
+  "radicadosNoEncontrados": ["47001310500420240099900"]
+}
 ```
 
 ---

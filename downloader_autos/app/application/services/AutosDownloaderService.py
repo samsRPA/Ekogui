@@ -53,7 +53,7 @@ class AutosDownloaderService(IAutosDownloaderService):
             stats = {"insertados": 0,"omitidosPorUrl": 0,"omitidosPorHash": 0,"omitidosPorPdfInvalido": 0,"omitidosPorNoDisponible": 0,"errores": 0}
             for auto in message.autos:
                 try:
-                    if await self.cAutoRamaRep.checkAutoExist(conn, auto.fechaAuto, message.radicacion, auto.urlAuto, message.origen):
+                    if await self.cAutoRamaRep.checkAutoExist(conn, auto.fechaAuto, message.radicacion, auto.urlAutoName, message.origen):
                         stats["omitidosPorUrl"] += 1
                         continue
 
@@ -74,8 +74,7 @@ class AutosDownloaderService(IAutosDownloaderService):
                     pdfPaths = await processor.toPdf(rawFilePath)
 
                     if not pdfPaths:
-                        # Un comprimido sin ningun archivo soportado adentro
-                        # (o vacio) no cuenta como error: no hay nada que subir.
+        
                         stats["omitidosPorPdfInvalido"] += 1
                         self.logger.warning(
                             f"🟡 Sin documentos convertibles - radicacion={message.radicacion} "
@@ -83,23 +82,19 @@ class AutosDownloaderService(IAutosDownloaderService):
                         )
                         continue
 
-                    # Un comprimido puede producir varios PDF (uno por cada
-                    # archivo soportado adentro, en cualquier subcarpeta). El
-                    # comprimido en si nunca se sube ni recibe consecutivo,
-                    # solo cada PDF resultante -> mismo radicado y fecha del
-                    # auto, cada uno con su propio consecutivo.
+                 
                     isFromCompressed = len(pdfPaths) > 1
                     for pdfPath in pdfPaths:
                         pdfPath = Path(pdfPath)
-                        # Si viene de un comprimido, el nombre original del
-                        # archivo interno se agrega a la URL guardada para
-                        # que nunca quede identica a la del zip padre: si no,
-                        # checkAutoExist (que compara la URL exacta) daria
-                        # falso-positivo con solo UN archivo insertado y
-                        # descartaria el auto completo en un reproceso,
-                        # perdiendo los archivos restantes del zip para siempre.
+            
                         childId = pdfPath.stem if isFromCompressed else None
                         await self._storeConvertedPdf(conn, message, auto, outputDir, pdfPath, consecutiveMap, seenHashes, stats, childId
+                        )
+
+                    if isFromCompressed:
+                        await self.cAutoRamaRep.addAutoRecord(
+                            conn, auto.fechaAuto, message.radicacion, None, auto.urlAutoName, None, message.origen,
+                            estadoDescarga="SI", tipoDocumento=fetchedExt.lstrip(".").lower()
                         )
                 except Exception as e:
                     stats["errores"] += 1
@@ -109,13 +104,13 @@ class AutosDownloaderService(IAutosDownloaderService):
                     )
                     continue
 
+            await self.db.commit(conn)
             self.logger.info(
                 f"📊 Resumen descarga autos - radicacion={message.radicacion} total={len(message.autos)} "
                 f"|🟢insertados={stats['insertados']} | 🔁omitidosPorUrl={stats['omitidosPorUrl']} | "
                 f"| 🔗omitidosPorHash={stats['omitidosPorHash']} | 📄omitidosPorPdfInvalido={stats['omitidosPorPdfInvalido']} "
                 f"| 🚫omitidosPorNoDisponible={stats['omitidosPorNoDisponible']} | 🔴errores={stats['errores']}"
             )
-            await self.db.commit(conn)
 
             self.logger.info(f"🟢 Descarga finalizada de autos - radicacion={message.radicacion}")
         except Exception:
@@ -145,12 +140,17 @@ class AutosDownloaderService(IAutosDownloaderService):
             stats["omitidosPorHash"] += 1
             return
 
+        autoUrl = f"{auto.urlAutoName}#{childId}" if childId else auto.urlAutoName
+        urlHashAuto = f"{autoUrl}|{fileHash}"
+        
         if fileHash in seenHashes:
             stats["omitidosPorHash"] += 1
+           
             return
 
         if await self.cAutoRamaRep.existsByHash(conn, auto.fechaAuto, message.radicacion, fileHash, message.origen):
             stats["omitidosPorHash"] += 1
+            await self.cAutoRamaRep.addAutoRecord(conn, auto.fechaAuto, message.radicacion, None, urlHashAuto, None, message.origen, estadoDescarga="NO")
             return
 
         seenHashes.add(fileHash)
@@ -167,8 +167,6 @@ class AutosDownloaderService(IAutosDownloaderService):
             stats["errores"] += 1
             return
 
-        autoUrl = f"{auto.urlAuto}#{childId}" if childId else auto.urlAuto
-        urlHashAuto = f"{autoUrl}|{fileHash}"
         if await self.cAutoRamaRep.addAutoRecord(conn, auto.fechaAuto, message.radicacion, routeS3, urlHashAuto, maxConsecutive, message.origen):
             stats["insertados"] += 1
 

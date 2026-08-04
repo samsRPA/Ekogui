@@ -1,4 +1,67 @@
 services:
+  # rabbitmq_ekogui:
+  #   image: rabbitmq:3-management
+  #   container_name: rabbitmq_ekogui
+  #   ports:
+  #     - "5672:5672"
+  #     - "15672:15672"
+  #   environment:
+  #     RABBITMQ_DEFAULT_USER: admin
+  #     RABBITMQ_DEFAULT_PASS: admin
+  #     RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 7200000 -rabbit heartbeat 30"
+  #   networks:
+  #     - ekogui_net
+  #   healthcheck:
+  #     test: ["CMD", "rabbitmqctl", "status"]
+  #     interval: 45s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 10s
+  #   # depends_on:
+  #   #   ssh_siugj_nft:
+  #   #     condition: service_started
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 4096M
+  #       reservations:
+  #         memory: 2048M
+
+
+  # ssh_siugj_nft:
+  #   image: alpine:latest
+  #   container_name: ssh_siugj_nft
+  #   volumes:
+  #     - ./stack/ssh_tunnel/bd-tunnel.sh:/bd-tunnel.sh:ro
+  #     - ./stack:/keys
+  #   command: sh /bd-tunnel.sh
+  #   env_file:
+  #     - ./stack/ssh_tunnel/.env
+  #   networks:
+  #     - siugj_nft_net
+  #   restart: always
+  #   healthcheck:
+  #     test: ["CMD", "sh", "-c", "netstat -tn | grep -q ESTABLISHED"]
+  #     interval: 30s
+  #     timeout: 15s
+  #     retries: 4
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 512M
+  #       reservations:
+  #         memory: 256M
+
 
   ms_ekogui:
     image: ms_ekogui:latest

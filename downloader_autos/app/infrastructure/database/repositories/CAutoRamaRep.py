@@ -70,7 +70,7 @@ class CAutoRamaRep():
         except Exception as e:
             raise RuntimeError(f"Error al consultar MAX(CONSECUTIVO): {e}")
 
-    async def addAutoRecord(self, conn, ntfDate: datetime, radication: str, s3Path: str, autoUrl: str, consecutive:int, origin: str):
+    async def addAutoRecord(self, conn, ntfDate: datetime, radication: str, s3Path: str, autoUrl: str, consecutive:int, origin: str, estadoDescarga: str = "SI", tipoDocumento: str = "pdf"):
         try:
             query = f"""
                 INSERT INTO {self._table}(
@@ -90,9 +90,9 @@ class CAutoRamaRep():
                     :s3Path,
                     :currentTimestamp,
                     :autoUrl,
-                    'SI',
+                    :estadoDescarga,
                     :origin,
-                    'pdf'
+                    :tipoDocumento
                 )
             """
             async with conn.cursor() as cursor:
@@ -103,7 +103,9 @@ class CAutoRamaRep():
                     "consecutive":consecutive,
                     "currentTimestamp": datetime.now(),
                     "autoUrl": autoUrl,
-                    "origin": origin
+                    "estadoDescarga": estadoDescarga,
+                    "origin": origin,
+                    "tipoDocumento": tipoDocumento.lower()
                 })
             return True
         except Exception as e:

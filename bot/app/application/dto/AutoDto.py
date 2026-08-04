@@ -1,7 +1,7 @@
 import re
 from datetime import date, datetime
 from typing import List, Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class AutoItemDto(BaseModel):
@@ -9,6 +9,13 @@ class AutoItemDto(BaseModel):
 
     fechaAuto:       Optional[date] = None
     urlAuto:         Optional[str] = None
+    namePDF:         Optional[str] = None
+    urlAutoName:     Optional[str] = None
+
+    @model_validator(mode="after")
+    def _buildUrlAutoName(self):
+        self.urlAutoName = f"{self.urlAuto}#{self.namePDF}"
+        return self
 
     @field_validator("fechaAuto", mode="before")
     @classmethod

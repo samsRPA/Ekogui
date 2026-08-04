@@ -20,3 +20,12 @@ class IEkoguiService(ABC):
         estado: str,
     ) -> dict:
         pass
+
+    @abstractmethod
+    async def searchCaseNumbers(
+        self,
+        entidadId: int,
+        radicados: List[str],
+        estado: str,
+    ) -> dict:
+        pass

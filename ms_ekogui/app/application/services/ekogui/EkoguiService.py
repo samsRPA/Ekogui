@@ -131,3 +131,51 @@ class EkoguiService(IEkoguiService):
             "lotesPublicados": 1,
             "entidadesConError": [],
         }
+
+    async def searchCaseNumbers(self, entidadId: int, radicados: List[str], estado: str) -> dict:
+        self.logger.info(
+            f"🌐 Iniciando busqueda de {len(radicados)} radicados - entidadId={entidadId} estado={estado}"
+        )
+
+        procesosEncontrados: list[dict] = []
+        radicadosNoEncontrados: List[str] = []
+
+        async with self.httpClient.contextClient() as client:
+            loggedIn = await self.scraper.login(client)
+            if not loggedIn:
+                raise RuntimeError("No se pudo iniciar sesion en Ekogui")
+
+            personaId = await self.scraper.buscarPersonaUsuario(client)
+            entidadesDisponibles = await self.scraper.obtenerEntidadesPersona(client, personaId)
+            entidadesPorId = {e["id"]: e for e in entidadesDisponibles}
+            entidad = entidadesPorId.get(entidadId)
+            if entidad is None:
+                raise ValueError(f"entidadId={entidadId} no esta entre las entidades disponibles para este usuario")
+
+            entidadNombre = entidad["nombre"]
+
+            for radicado in radicados:
+                proceso = await self.scraper.buscarProcesoPorRadicado(client, entidadId, entidadNombre, radicado, estado)
+                if proceso is None:
+                    self.logger.warning(f"🟡 radicado={radicado} no encontrado - entidadId={entidadId} ({entidadNombre})")
+                    radicadosNoEncontrados.append(radicado)
+                else:
+                    procesosEncontrados.append(proceso)
+
+            lotesPublicados = 0
+            if procesosEncontrados:
+                lote = LoteProcesosRecord.fromPagina(procesosEncontrados, entidadId, entidadNombre, estado)
+                await self.producer.publishMessage(lote.model_dump(), priority=2)
+                lotesPublicados = 1
+
+        self.logger.info(
+            f"🟢 busqueda de radicados finalizada - entidadId={entidadId} ({entidadNombre}) -> "
+            f"extraidos={len(procesosEncontrados)} radicadosNoEncontrados={radicadosNoEncontrados}"
+        )
+        return {
+            "entidadId": entidadId,
+            "estado": estado,
+            "extraidos": len(procesosEncontrados),
+            "lotesPublicados": lotesPublicados,
+            "radicadosNoEncontrados": radicadosNoEncontrados,
+        }

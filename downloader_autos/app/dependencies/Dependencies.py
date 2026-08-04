@@ -78,7 +78,10 @@ class Dependencies(containers.DeclarativeContainer):
     # contenido original.
     pdfProcessor: providers.Factory[IFileProcessor] = providers.Factory(PdfProcessor)
     docxProcessor: providers.Factory[IFileProcessor] = providers.Factory(DocxProcessor)
-    imageProcessor: providers.Factory[IFileProcessor] = providers.Factory(ImageProcessor)
+    # Deshabilitado a pedido: las imagenes ya no se convierten a PDF, se
+    # omiten. Se deja ImageProcessor sin usar (no se borra) por si se
+    # vuelve a habilitar mas adelante.
+    # imageProcessor: providers.Factory[IFileProcessor] = providers.Factory(ImageProcessor)
     xlsxProcessor: providers.Factory[IFileProcessor] = providers.Factory(XlsxProcessor)
     htmlXlsProcessor: providers.Factory[IFileProcessor] = providers.Factory(HtmlXlsProcessor)
 
@@ -99,13 +102,15 @@ class Dependencies(containers.DeclarativeContainer):
             "application/msword": docxProcessor,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": xlsxProcessor,
             "application/vnd.ms-excel": xlsxProcessor,
-            "image/png": imageProcessor,
-            "image/jpeg": imageProcessor,
-            "image/jpg": imageProcessor,
-            "image/webp": imageProcessor,
-            "image/gif": imageProcessor,
-            "image/bmp": imageProcessor,
-            "image/tiff": imageProcessor,
+            # Imagenes deshabilitadas a pedido: sin entrada aca,
+            # ProcessorFactory.getProcessor las omite en vez de convertirlas.
+            # "image/png": imageProcessor,
+            # "image/jpeg": imageProcessor,
+            # "image/jpg": imageProcessor,
+            # "image/webp": imageProcessor,
+            # "image/gif": imageProcessor,
+            # "image/bmp": imageProcessor,
+            # "image/tiff": imageProcessor,
             "htmlXsl": htmlXlsProcessor,
             "application/zip": compressedProcessor,
             "application/x-7z-compressed": compressedProcessor,

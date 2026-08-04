@@ -7,8 +7,10 @@ from pydantic import BaseModel
 class AutoItem(BaseModel):
     """Un auto/documento individual dentro del lote de un radicado."""
 
-    fechaAuto: date
-    urlAuto:   str
+    fechaAuto:    date
+    urlAuto:      str
+    namePDF:      Optional[str] = None
+    urlAutoName:  Optional[str] = None
 
 
 class AutoQueueMessage(BaseModel):

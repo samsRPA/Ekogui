@@ -22,6 +22,11 @@ class ProcessorFactory(IProcessorFactory):
         if contentTypeKey in self.processorMap:
             return self.processorMap[contentTypeKey]()
 
+        # Imagenes deshabilitadas a pedido (ver Dependencies.py): se omiten
+        # en lugar de fallar como un tipo no soportado.
+        if contentTypeKey.startswith("image/"):
+            return None
+
         raise ValueError(f"No hay procesador definido para tipo '{contentType}' y url '{url}'")
 
     async def getProcessorForLocalFile(self, filePath: str) -> Optional[IFileProcessor]:
