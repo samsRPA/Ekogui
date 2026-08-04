@@ -68,7 +68,7 @@ class EkoguiService(IEkoguiService):
                         lotecrudo = procesos[inicio:inicio + batchSize]
                         try:
                             lote = LoteProcesosRecord.fromPagina(lotecrudo, entidadId, entidadNombre, estado)
-                            await self.producer.publishMessage(lote.model_dump(), priority=2)
+                            await self.producer.publishMessage(lote.model_dump(), priority=1)
                             lotesPublicados += 1
                         except Exception:
                             self.logger.exception(
