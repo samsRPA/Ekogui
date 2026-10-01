@@ -11,11 +11,11 @@ class SearchCaseNumbersResponseDto(BaseModel):
     radicadosNoEncontrados: List[str] = []
 
     @classmethod
-    def fromResultado(cls, resultado: dict) -> "SearchCaseNumbersResponseDto":
+    def fromResult(cls, result: dict) -> "SearchCaseNumbersResponseDto":
         return cls(
-            entidadId=resultado["entidadId"],
-            estado=resultado["estado"],
-            extraidos=resultado["extraidos"],
-            lotesPublicados=resultado["lotesPublicados"],
-            radicadosNoEncontrados=resultado.get("radicadosNoEncontrados", []),
+            entidadId=result["entityId"],
+            estado=result["state"],
+            extraidos=result["extracted"],
+            lotesPublicados=result["publishedBatches"],
+            radicadosNoEncontrados=result.get("notFoundCaseNumbers", []),
         )

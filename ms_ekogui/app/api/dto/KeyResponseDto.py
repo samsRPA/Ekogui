@@ -11,11 +11,11 @@ class KeyResponseDto(BaseModel):
     entidadesConError: List[int] = []
 
     @classmethod
-    def fromResultado(cls, resultado: dict) -> "KeyResponseDto":
+    def fromResult(cls, result: dict) -> "KeyResponseDto":
         return cls(
-            entidades=resultado["entidades"],
-            estado=resultado["estado"],
-            extraidos=resultado["extraidos"],
-            lotesPublicados=resultado["lotesPublicados"],
-            entidadesConError=resultado.get("entidadesConError", []),
+            entidades=result["entities"],
+            estado=result["state"],
+            extraidos=result["extracted"],
+            lotesPublicados=result["publishedBatches"],
+            entidadesConError=result.get("entitiesWithErrors", []),
         )

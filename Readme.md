@@ -523,6 +523,69 @@ curl -X POST 'http://localhost:8000/api/v1/ekogui/searchCaseNumbers' \
 
 ---
 
+### `POST /api/v1/ekogui/searchCaseNumbersBulk`
+
+Búsqueda **masiva** de radicados de una entidad. En vez de un request por radicado (como `searchCaseNumbers`), hace **una sola pasada** por el listado paginado de la entidad (`LISTING_PAGE_SIZE` = 10000 por página) y filtra localmente por `numeroProceso`: son `1 + ceil(totalProcesos / 10000)` requests sin importar cuántos radicados se envíen, solo guarda en memoria los que coinciden y deja de paginar en cuanto aparecen todos. Los encontrados se publican a `QUEUE_SCRAPE_NAME` en lotes de `batchSize` con prioridad `2`, para que varias réplicas de `bot` se repartan el trabajo.
+
+Los radicados se limpian (espacios y guiones), se deduplican y los que no tengan exactamente 23 dígitos se devuelven en `invalid` sin frenar el resto.
+
+| Campo          | Tipo       | Requerido | Descripción                                             |
+| --------------- | ----------- | :--------: | ----------------------------------------------------------- |
+| `entityId`     | `int`      | ✅         | Id de la entidad donde buscar los radicados                 |
+| `caseNumbers`  | `str[]`    | ✅         | Radicados de 23 dígitos                                      |
+| `state`        | `str`      | ❌ (`PROCESO_ENTIDAD_ACTIVO`) | `PROCESO_ENTIDAD_ACTIVO` o `PROCESO_ENTIDAD_TERMINADO` |
+| `batchSize`    | `int`      | ❌ (`10`)  | Cantidad de procesos por mensaje publicado                   |
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/ekogui/searchCaseNumbersBulk' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "entityId": 405,
+    "caseNumbers": ["11001310501420120057000", "05001310501520100080700"],
+    "state": "PROCESO_ENTIDAD_ACTIVO",
+    "batchSize": 10
+  }'
+```
+
+**Respuesta** (`202 Accepted`; `400` si la entidad no está disponible para el usuario):
+
+```json
+{
+  "entityId": 405,
+  "state": "PROCESO_ENTIDAD_ACTIVO",
+  "searched": 2,
+  "found": 1,
+  "publishedBatches": 1,
+  "notFound": ["05001310501520100080700"],
+  "invalid": []
+}
+```
+
+---
+
+### `POST /api/v1/ekogui/searchCaseNumbersBulkExcel`
+
+Igual que `searchCaseNumbersBulk` (misma función del servicio), pero los radicados se leen de un Excel `.xlsx`/`.xlsm` enviado como `multipart/form-data`: **primera hoja, primera columna**. El encabezado es opcional: si el primer valor no es un radicado de 23 dígitos se descarta como encabezado. Celdas vacías se ignoran.
+
+| Campo        | Tipo     | Requerido | Descripción                                   |
+| ------------- | --------- | :--------: | ------------------------------------------------ |
+| `file`       | archivo  | ✅         | Excel `.xlsx`/`.xlsm`                             |
+| `entityId`   | `int`    | ✅         | Id de la entidad                                  |
+| `state`      | `str`    | ❌ (`PROCESO_ENTIDAD_ACTIVO`) | Estado de los procesos     |
+| `batchSize`  | `int`    | ❌ (`10`)  | Cantidad de procesos por mensaje publicado        |
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/ekogui/searchCaseNumbersBulkExcel' \
+  -F 'file=@task/ANALISIS SELECCIÓN DE MUESTRA ANS 2 - SEPTIEMBRE.xlsx' \
+  -F 'entityId=405' \
+  -F 'state=PROCESO_ENTIDAD_ACTIVO' \
+  -F 'batchSize=10'
+```
+
+**Respuesta**: mismo formato que `searchCaseNumbersBulk` (`400` si el archivo no es un Excel válido o la entidad no está disponible).
+
+---
+
 ## Resiliencia
 
 - **Consumo de colas** (`RabbitMQConsumer`): usa `aio_pika.connect_robust` (reconexión automática de la conexión AMQP) y ack manual por mensaje; si el handler lanza una excepción, el mensaje se rechaza sin reencolar (`nack(requeue=False)`) y queda registrado en el log — no hay reintento automático a nivel de mensaje.

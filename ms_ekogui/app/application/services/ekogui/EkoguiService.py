@@ -1,40 +1,48 @@
+import re
+import asyncio
 import logging
-from typing import List, Union
+from typing import List, Optional, Union
 
-from app.application.dto.LoteProcesosRecord import LoteProcesosRecord
+from app.application.dto.ProcessBatchRecord import ProcessBatchRecord
 from app.domain.interfaces.IBrokerProducer import IBrokerProducer
 from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
 from app.domain.interfaces.IEkoguiService import IEkoguiService
+from app.domain.interfaces.IExcelReader import IExcelReader
 from app.domain.interfaces.IHttpClient import IHttpClient
+
+CASE_NUMBER_PATTERN = re.compile(r"[0-9]{23}")
+CASE_NUMBER_SEPARATORS = re.compile(r"[\s-]")
 
 
 class EkoguiService(IEkoguiService):
-    def __init__(self, producer: IBrokerProducer, httpClient: IHttpClient, scraper: IEkoguiScraper):
+    def __init__(self, producer: IBrokerProducer, httpClient: IHttpClient, scraper: IEkoguiScraper,
+                 excelReader: IExcelReader):
         self.producer = producer
         self.httpClient = httpClient
         self.scraper = scraper
+        self.excelReader = excelReader
         self.logger = logging.getLogger(__name__)
 
-    def _resolverEntidades(self, entidades: Union[str, List[int]], entidadesDisponibles: list[dict]) -> list[dict]:
-        if entidades == "todos":
-            return entidadesDisponibles
+    def _resolveEntities(self, entities: Union[str, List[int]], availableEntities: list[dict]) -> list[dict]:
+        if entities == "todos":
+            return availableEntities
 
-        disponiblesPorId = {e["id"]: e for e in entidadesDisponibles}
-        resueltas = []
-        for entidadId in entidades:
-            entidad = disponiblesPorId.get(entidadId)
-            if entidad is None:
-                self.logger.warning(f"🟡 entidadId={entidadId} no esta entre las entidades disponibles para este usuario; se omite.")
+        availableById = {e["id"]: e for e in availableEntities}
+        resolved = []
+        for entityId in entities:
+            entity = availableById.get(entityId)
+            if entity is None:
+                self.logger.warning(f"🟡 entidadId={entityId} no esta entre las entidades disponibles para este usuario; se omite.")
                 continue
-            resueltas.append(entidad)
-        return resueltas
+            resolved.append(entity)
+        return resolved
 
-    async def publishOrder(self, entidades: Union[str, List[int]], estado: str, batchSize: int) -> dict:
-        lotesPublicados = 0
-        extraidos = 0
-        entidadesConError: list[int] = []
+    async def publishOrder(self, entities: Union[str, List[int]], state: str, batchSize: int) -> dict:
+        publishedBatches = 0
+        extracted = 0
+        entitiesWithErrors: list[int] = []
         self.logger.info(
-            f"🌐 Iniciando publishOrder - entidades={entidades} estado={estado} batchSize={batchSize}"
+            f"🌐 Iniciando publishOrder - entidades={entities} estado={state} batchSize={batchSize}"
         )
         try:
             async with self.httpClient.contextClient() as client:
@@ -42,37 +50,37 @@ class EkoguiService(IEkoguiService):
                 if not loggedIn:
                     raise RuntimeError("No se pudo iniciar sesion en Ekogui")
 
-                personaId = await self.scraper.buscarPersonaUsuario(client)
-                entidadesDisponibles = await self.scraper.obtenerEntidadesPersona(client, personaId)
-                entidadesARecorrer = self._resolverEntidades(entidades, entidadesDisponibles)
+                personId = await self.scraper.getUserPersonId(client)
+                availableEntities = await self.scraper.getPersonEntities(client, personId)
+                entitiesToProcess = self._resolveEntities(entities, availableEntities)
 
-                for entidad in entidadesARecorrer:
-                    entidadId, entidadNombre = entidad["id"], entidad["nombre"]
+                for entity in entitiesToProcess:
+                    entityId, entityName = entity["id"], entity["nombre"]
 
                     try:
-                        procesos = await self.scraper.listarProcesosDeEntidad(client, entidadId, entidadNombre, estado)
+                        processes = await self.scraper.listEntityProcesses(client, entityId, entityName, state)
                     except Exception:
-                        entidadesConError.append(entidadId)
+                        entitiesWithErrors.append(entityId)
                         self.logger.exception(
-                            f"🔴 Error listando procesos de entidadId={entidadId} ({entidadNombre}); se continua con la siguiente entidad"
+                            f"🔴 Error listando procesos de entidadId={entityId} ({entityName}); se continua con la siguiente entidad"
                         )
                         continue
 
-                    if not procesos:
-                        self.logger.warning(f"🟡 entidadId={entidadId} ({entidadNombre}) sin procesos para publicar")
+                    if not processes:
+                        self.logger.warning(f"🟡 entidadId={entityId} ({entityName}) sin procesos para publicar")
                         continue
 
-                    extraidos += len(procesos)
-                    totalLotes = (len(procesos) + batchSize - 1) // batchSize
-                    for indice, inicio in enumerate(range(0, len(procesos), batchSize), start=1):
-                        lotecrudo = procesos[inicio:inicio + batchSize]
+                    extracted += len(processes)
+                    totalBatches = (len(processes) + batchSize - 1) // batchSize
+                    for index, start in enumerate(range(0, len(processes), batchSize), start=1):
+                        rawBatch = processes[start:start + batchSize]
                         try:
-                            lote = LoteProcesosRecord.fromPagina(lotecrudo, entidadId, entidadNombre, estado)
-                            await self.producer.publishMessage(lote.model_dump(), priority=1)
-                            lotesPublicados += 1
+                            batch = ProcessBatchRecord.fromPage(rawBatch, entityId, entityName, state)
+                            await self.producer.publishMessage(batch.model_dump(), priority=1)
+                            publishedBatches += 1
                         except Exception:
                             self.logger.exception(
-                                f"🔴 Error publicando lote {indice}/{totalLotes} de entidadId={entidadId} ({entidadNombre}); "
+                                f"🔴 Error publicando lote {index}/{totalBatches} de entidadId={entityId} ({entityName}); "
                                 f"se continua con el siguiente lote"
                             )
 
@@ -81,101 +89,196 @@ class EkoguiService(IEkoguiService):
             raise
 
         self.logger.info(
-            f"🟢 publishOrder finalizado - entidades={entidades} estado={estado} -> "
-            f"extraidos={extraidos} lotesPublicados={lotesPublicados} entidadesConError={entidadesConError}"
+            f"🟢 publishOrder finalizado - entidades={entities} estado={state} -> "
+            f"extraidos={extracted} lotesPublicados={publishedBatches} entidadesConError={entitiesWithErrors}"
         )
         return {
-            "entidades": entidades,
-            "estado": estado,
-            "extraidos": extraidos,
-            "lotesPublicados": lotesPublicados,
-            "entidadesConError": entidadesConError,
+            "entities": entities,
+            "state": state,
+            "extracted": extracted,
+            "publishedBatches": publishedBatches,
+            "entitiesWithErrors": entitiesWithErrors,
         }
 
-    async def searchCaseNumber(self, entidadId: int, radicado: str, estado: str) -> dict:
-        self.logger.info(f"🌐 Iniciando busqueda de radicado={radicado} - entidadId={entidadId} estado={estado}")
+    async def searchCaseNumber(self, entityId: int, caseNumber: str, state: str) -> dict:
+        self.logger.info(f"🌐 Iniciando busqueda de radicado={caseNumber} - entidadId={entityId} estado={state}")
 
         async with self.httpClient.contextClient() as client:
             loggedIn = await self.scraper.login(client)
             if not loggedIn:
                 raise RuntimeError("No se pudo iniciar sesion en Ekogui")
 
-            personaId = await self.scraper.buscarPersonaUsuario(client)
-            entidadesDisponibles = await self.scraper.obtenerEntidadesPersona(client, personaId)
-            entidadesPorId = {e["id"]: e for e in entidadesDisponibles}
-            entidad = entidadesPorId.get(entidadId)
-            if entidad is None:
-                raise ValueError(f"entidadId={entidadId} no esta entre las entidades disponibles para este usuario")
+            personId = await self.scraper.getUserPersonId(client)
+            availableEntities = await self.scraper.getPersonEntities(client, personId)
+            entitiesById = {e["id"]: e for e in availableEntities}
+            entity = entitiesById.get(entityId)
+            if entity is None:
+                raise ValueError(f"entidadId={entityId} no esta entre las entidades disponibles para este usuario")
 
-            entidadNombre = entidad["nombre"]
-            proceso = await self.scraper.buscarProcesoPorRadicado(client, entidadId, entidadNombre, radicado, estado)
+            entityName = entity["nombre"]
+            process = await self.scraper.searchProcessByCaseNumber(client, entityId, entityName, caseNumber, state)
 
-            if proceso is None:
-                self.logger.warning(f"🟡 radicado={radicado} no encontrado - entidadId={entidadId} ({entidadNombre})")
+            if process is None:
+                self.logger.warning(f"🟡 radicado={caseNumber} no encontrado - entidadId={entityId} ({entityName})")
                 return {
-                    "entidades": [entidadId],
-                    "estado": estado,
-                    "extraidos": 0,
-                    "lotesPublicados": 0,
-                    "entidadesConError": [entidadId],
+                    "entities": [entityId],
+                    "state": state,
+                    "extracted": 0,
+                    "publishedBatches": 0,
+                    "entitiesWithErrors": [entityId],
                 }
 
-            lote = LoteProcesosRecord.fromPagina([proceso], entidadId, entidadNombre, estado)
-            await self.producer.publishMessage(lote.model_dump(), priority=2)
+            batch = ProcessBatchRecord.fromPage([process], entityId, entityName, state)
+            await self.producer.publishMessage(batch.model_dump(), priority=2)
 
-        self.logger.info(f"🟢 radicado={radicado} encontrado y publicado - entidadId={entidadId} ({entidadNombre})")
+        self.logger.info(f"🟢 radicado={caseNumber} encontrado y publicado - entidadId={entityId} ({entityName})")
         return {
-            "entidades": [entidadId],
-            "estado": estado,
-            "extraidos": 1,
-            "lotesPublicados": 1,
-            "entidadesConError": [],
+            "entities": [entityId],
+            "state": state,
+            "extracted": 1,
+            "publishedBatches": 1,
+            "entitiesWithErrors": [],
         }
 
-    async def searchCaseNumbers(self, entidadId: int, radicados: List[str], estado: str) -> dict:
+    async def searchCaseNumbers(self, entityId: int, caseNumbers: List[str], state: str) -> dict:
         self.logger.info(
-            f"🌐 Iniciando busqueda de {len(radicados)} radicados - entidadId={entidadId} estado={estado}"
+            f"🌐 Iniciando busqueda de {len(caseNumbers)} radicados - entidadId={entityId} estado={state}"
         )
 
-        procesosEncontrados: list[dict] = []
-        radicadosNoEncontrados: List[str] = []
+        foundProcesses: list[dict] = []
+        notFoundCaseNumbers: List[str] = []
 
         async with self.httpClient.contextClient() as client:
             loggedIn = await self.scraper.login(client)
             if not loggedIn:
                 raise RuntimeError("No se pudo iniciar sesion en Ekogui")
 
-            personaId = await self.scraper.buscarPersonaUsuario(client)
-            entidadesDisponibles = await self.scraper.obtenerEntidadesPersona(client, personaId)
-            entidadesPorId = {e["id"]: e for e in entidadesDisponibles}
-            entidad = entidadesPorId.get(entidadId)
-            if entidad is None:
-                raise ValueError(f"entidadId={entidadId} no esta entre las entidades disponibles para este usuario")
+            personId = await self.scraper.getUserPersonId(client)
+            availableEntities = await self.scraper.getPersonEntities(client, personId)
+            entitiesById = {e["id"]: e for e in availableEntities}
+            entity = entitiesById.get(entityId)
+            if entity is None:
+                raise ValueError(f"entidadId={entityId} no esta entre las entidades disponibles para este usuario")
 
-            entidadNombre = entidad["nombre"]
+            entityName = entity["nombre"]
 
-            for radicado in radicados:
-                proceso = await self.scraper.buscarProcesoPorRadicado(client, entidadId, entidadNombre, radicado, estado)
-                if proceso is None:
-                    self.logger.warning(f"🟡 radicado={radicado} no encontrado - entidadId={entidadId} ({entidadNombre})")
-                    radicadosNoEncontrados.append(radicado)
+            for caseNumber in caseNumbers:
+                process = await self.scraper.searchProcessByCaseNumber(client, entityId, entityName, caseNumber, state)
+                if process is None:
+                    self.logger.warning(f"🟡 radicado={caseNumber} no encontrado - entidadId={entityId} ({entityName})")
+                    notFoundCaseNumbers.append(caseNumber)
                 else:
-                    procesosEncontrados.append(proceso)
+                    foundProcesses.append(process)
 
-            lotesPublicados = 0
-            if procesosEncontrados:
-                lote = LoteProcesosRecord.fromPagina(procesosEncontrados, entidadId, entidadNombre, estado)
-                await self.producer.publishMessage(lote.model_dump(), priority=2)
-                lotesPublicados = 1
+            publishedBatches = 0
+            if foundProcesses:
+                batch = ProcessBatchRecord.fromPage(foundProcesses, entityId, entityName, state)
+                await self.producer.publishMessage(batch.model_dump(), priority=2)
+                publishedBatches = 1
 
         self.logger.info(
-            f"🟢 busqueda de radicados finalizada - entidadId={entidadId} ({entidadNombre}) -> "
-            f"extraidos={len(procesosEncontrados)} radicadosNoEncontrados={radicadosNoEncontrados}"
+            f"🟢 busqueda de radicados finalizada - entidadId={entityId} ({entityName}) -> "
+            f"extraidos={len(foundProcesses)} radicadosNoEncontrados={notFoundCaseNumbers}"
         )
         return {
-            "entidadId": entidadId,
-            "estado": estado,
-            "extraidos": len(procesosEncontrados),
-            "lotesPublicados": lotesPublicados,
-            "radicadosNoEncontrados": radicadosNoEncontrados,
+            "entityId": entityId,
+            "state": state,
+            "extracted": len(foundProcesses),
+            "publishedBatches": publishedBatches,
+            "notFoundCaseNumbers": notFoundCaseNumbers,
         }
+
+    @staticmethod
+    def _cleanCaseNumber(raw: str) -> Optional[str]:
+        """Strips whitespace/dashes and returns the case number if it is
+        exactly 23 digits, or None otherwise."""
+        caseNumber = CASE_NUMBER_SEPARATORS.sub("", str(raw))
+        return caseNumber if CASE_NUMBER_PATTERN.fullmatch(caseNumber) else None
+
+    def _normalizeCaseNumbers(self, rawCaseNumbers: List[str]) -> tuple[list[str], list[str]]:
+        """Splits the input into valid case numbers (cleaned, deduplicated,
+        original order kept) and the raw values that are not 23 digits."""
+        valid: list[str] = []
+        invalid: list[str] = []
+        seen: set[str] = set()
+        for raw in rawCaseNumbers:
+            caseNumber = self._cleanCaseNumber(raw)
+            if caseNumber is None:
+                invalid.append(str(raw))
+            elif caseNumber not in seen:
+                seen.add(caseNumber)
+                valid.append(caseNumber)
+        return valid, invalid
+
+    async def searchCaseNumbersBulk(self, entityId: int, caseNumbers: List[str], state: str, batchSize: int) -> dict:
+        """Bulk search shared by the JSON and Excel endpoints: one login, one
+        walk over the entity's paginated listing filtered locally (instead of
+        one request per case number), and the matches are published in
+        batches of batchSize so several bot replicas can share the work."""
+        valid, invalid = self._normalizeCaseNumbers(caseNumbers)
+        self.logger.info(
+            f"🌐 Starting bulk search - entityId={entityId} state={state} valid={len(valid)} invalid={len(invalid)} batchSize={batchSize}"
+        )
+
+        result = {
+            "entityId": entityId,
+            "state": state,
+            "searched": len(valid),
+            "found": 0,
+            "publishedBatches": 0,
+            "notFound": [],
+            "invalid": invalid,
+        }
+        if not valid:
+            self.logger.warning(f"🟡 entityId={entityId} no valid case numbers to search")
+            return result
+
+        async with self.httpClient.contextClient() as client:
+            loggedIn = await self.scraper.login(client)
+            if not loggedIn:
+                raise RuntimeError("Could not log in to Ekogui")
+
+            personId = await self.scraper.getUserPersonId(client)
+            availableEntities = await self.scraper.getPersonEntities(client, personId)
+            entity = {e["id"]: e for e in availableEntities}.get(entityId)
+            if entity is None:
+                raise ValueError(f"entityId={entityId} is not among the entities available to this user")
+
+            entityName = entity["nombre"]
+            processes = await self.scraper.searchProcessesByCaseNumbers(client, entityId, entityName, set(valid), state)
+
+        publishedBatches = 0
+        totalBatches = (len(processes) + batchSize - 1) // batchSize
+        for index, start in enumerate(range(0, len(processes), batchSize), start=1):
+            rawBatch = processes[start:start + batchSize]
+            try:
+                batch = ProcessBatchRecord.fromPage(rawBatch, entityId, entityName, state)
+                await self.producer.publishMessage(batch.model_dump(), priority=2)
+                publishedBatches += 1
+            except Exception:
+                self.logger.exception(
+                    f"🔴 Error publishing batch {index}/{totalBatches} of entityId={entityId} ({entityName}); "
+                    f"continuing with the next batch"
+                )
+
+        foundCaseNumbers = {str(p.get("numeroProceso") or "").strip() for p in processes}
+        notFound = [caseNumber for caseNumber in valid if caseNumber not in foundCaseNumbers]
+
+        self.logger.info(
+            f"🟢 Bulk search finished - entityId={entityId} ({entityName}) -> "
+            f"found={len(processes)} publishedBatches={publishedBatches}/{totalBatches} notFound={len(notFound)} invalid={len(invalid)}"
+        )
+        result.update(found=len(processes), publishedBatches=publishedBatches, notFound=notFound)
+        return result
+
+    async def searchCaseNumbersFromExcel(self, entityId: int, content: bytes, state: str, batchSize: int) -> dict:
+        """Reads the first column of the first sheet and runs the same bulk
+        search. The first value is treated as a header and skipped when it is
+        not a case number, so files with or without header both work."""
+        values = await asyncio.to_thread(self.excelReader.readFirstColumn, content)
+        if values and self._cleanCaseNumber(values[0]) is None:
+            self.logger.info(f"📄 Skipping header row '{values[0]}'")
+            values = values[1:]
+
+        self.logger.info(f"📄 Excel read - {len(values)} values in the first column")
+        return await self.searchCaseNumbersBulk(entityId, values, state, batchSize)

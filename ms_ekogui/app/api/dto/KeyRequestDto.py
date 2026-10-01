@@ -2,19 +2,19 @@ from typing import List, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-Estado = Literal["PROCESO_ENTIDAD_ACTIVO", "PROCESO_ENTIDAD_TERMINADO"]
+State = Literal["PROCESO_ENTIDAD_ACTIVO", "PROCESO_ENTIDAD_TERMINADO"]
 
 
 class KeyRequestDto(BaseModel):
     entidades: Union[Literal["todos"], List[int]] = Field(description="'todos', o una lista de entidadId a procesar.")
-    estado: Estado = Field(default="PROCESO_ENTIDAD_ACTIVO", description="Estado de los procesos a buscar.")
+    estado: State = Field(default="PROCESO_ENTIDAD_ACTIVO", description="Estado de los procesos a buscar.")
     batchSize: int = Field(default=10, ge=1, description="Cantidad de procesos por lote publicado en la cola.")
 
     model_config = ConfigDict(extra="forbid")
 
     @field_validator("entidades")
     @classmethod
-    def validarEntidades(cls, v):
+    def validateEntities(cls, v):
         if v == "todos":
             return v
         if not isinstance(v, list) or len(v) == 0:

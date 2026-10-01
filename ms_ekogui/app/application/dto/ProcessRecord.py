@@ -3,7 +3,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class ProcesoRecord(BaseModel):
+class ProcessRecord(BaseModel):
     procesoId: int
     procesoEntidadId: Optional[int] = None
     numeroProceso: str
@@ -12,7 +12,7 @@ class ProcesoRecord(BaseModel):
     entidadNombre: str
 
     @classmethod
-    def fromRaw(cls, raw: dict, entidadId: int, entidadNombre: str) -> "ProcesoRecord":
+    def fromRaw(cls, raw: dict, entityId: int, entityName: str) -> "ProcessRecord":
         if not raw or raw.get("id") is None:
             raise ValueError("Registro de proceso vacío o inválido.")
         return cls(
@@ -20,6 +20,6 @@ class ProcesoRecord(BaseModel):
             procesoEntidadId=raw.get("idProcesoEntidad"),
             numeroProceso=str(raw.get("numeroProceso") or raw["id"]),
             despachoInicialNombre=raw.get("despachoInicialNombre"),
-            entidadId=entidadId,
-            entidadNombre=entidadNombre,
+            entidadId=entityId,
+            entidadNombre=entityName,
         )

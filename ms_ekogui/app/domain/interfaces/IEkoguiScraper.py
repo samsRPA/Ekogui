@@ -16,28 +16,37 @@ class IEkoguiScraper(ABC):
         ...
 
     @abstractmethod
-    async def buscarPersonaUsuario(self, client: IContextClient) -> int:
-        """Retorna el personaId del usuario logueado."""
+    async def getUserPersonId(self, client: IContextClient) -> int:
+        """Retorna el personId del usuario logueado."""
         ...
 
     @abstractmethod
-    async def obtenerEntidadesPersona(self, client: IContextClient, personaId: int) -> list[dict]:
+    async def getPersonEntities(self, client: IContextClient, personId: int) -> list[dict]:
         """Retorna las entidades (id, nombre) a las que el usuario tiene acceso."""
         ...
 
     @abstractmethod
-    async def listarProcesosDeEntidad(self, client: IContextClient, entidadId: int,
-                                       entidadNombre: str, estado: str) -> list[dict]:
+    async def listEntityProcesses(self, client: IContextClient, entityId: int,
+                                  entityName: str, state: str) -> list[dict]:
         """Retorna TODOS los procesos judiciales de la entidad en una sola
         consulta (sin paginar contra Ekogui). Internamente maneja el SSO al
         modulo judicial y la seleccion de entidad (una sola vez por
-        entidadId, cacheado) sin exponer esos detalles al llamador."""
+        entityId, cacheado) sin exponer esos detalles al llamador."""
         ...
 
     @abstractmethod
-    async def buscarProcesoPorRadicado(self, client: IContextClient, entidadId: int,
-                                        entidadNombre: str, radicado: str,
-                                        estado: str) -> Optional[dict]:
+    async def searchProcessByCaseNumber(self, client: IContextClient, entityId: int,
+                                        entityName: str, caseNumber: str,
+                                        state: str) -> Optional[dict]:
         """Busca UN proceso puntual por su numeroProceso (radicado) dentro de
         la entidad. Retorna el proceso si lo encuentra, o None."""
+        ...
+
+    @abstractmethod
+    async def searchProcessesByCaseNumbers(self, client: IContextClient, entityId: int,
+                                           entityName: str, caseNumbers: set[str],
+                                           state: str) -> list[dict]:
+        """Bulk lookup of case numbers inside the entity by walking the
+        paginated listing and filtering locally (not one request per case
+        number). Returns only the matching processes."""
         ...

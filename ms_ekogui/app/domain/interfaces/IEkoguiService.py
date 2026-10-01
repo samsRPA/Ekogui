@@ -6,8 +6,8 @@ class IEkoguiService(ABC):
     @abstractmethod
     async def publishOrder(
         self,
-        entidades: Union[str, List[int]],
-        estado: str,
+        entities: Union[str, List[int]],
+        state: str,
         batchSize: int,
     ) -> dict:
         pass
@@ -15,17 +15,37 @@ class IEkoguiService(ABC):
     @abstractmethod
     async def searchCaseNumber(
         self,
-        entidadId: int,
-        radicado: str,
-        estado: str,
+        entityId: int,
+        caseNumber: str,
+        state: str,
     ) -> dict:
         pass
 
     @abstractmethod
     async def searchCaseNumbers(
         self,
-        entidadId: int,
-        radicados: List[str],
-        estado: str,
+        entityId: int,
+        caseNumbers: List[str],
+        state: str,
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def searchCaseNumbersBulk(
+        self,
+        entityId: int,
+        caseNumbers: List[str],
+        state: str,
+        batchSize: int,
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def searchCaseNumbersFromExcel(
+        self,
+        entityId: int,
+        content: bytes,
+        state: str,
+        batchSize: int,
     ) -> dict:
         pass

@@ -3,9 +3,11 @@ from dependency_injector import containers, providers
 from app.domain.interfaces.IBrokerProducer import IBrokerProducer
 from app.domain.interfaces.IEkoguiScraper import IEkoguiScraper
 from app.domain.interfaces.IEkoguiService import IEkoguiService
+from app.domain.interfaces.IExcelReader import IExcelReader
 from app.domain.interfaces.IHttpClient import IHttpClient
 
 from app.config.config import Settings
+from app.infrastructure.excel.OpenpyxlExcelReader import OpenpyxlExcelReader
 from app.infrastructure.http.httpClient import AioHttpClient
 from app.infrastructure.rabbitmq.RabbitMQProducer import RabbitMQProducer
 from app.application.services.ekogui.EkoguiScraper import EkoguiScraper
@@ -44,10 +46,14 @@ class Dependencies(containers.DeclarativeContainer):
         maxPriority=2,
     )
 
+    # Excel reader (first column of the first sheet) for bulk case number uploads
+    excelReader: providers.Singleton[IExcelReader] = providers.Singleton(OpenpyxlExcelReader)
+
     # Factory del servicio principal
     ekoguiService: providers.Factory[IEkoguiService] = providers.Factory(
         EkoguiService,
         producer=rabbitmqProducer,
         httpClient=httpClient,
         scraper=ekoguiScraper,
+        excelReader=excelReader,
     )

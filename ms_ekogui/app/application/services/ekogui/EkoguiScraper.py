@@ -15,7 +15,7 @@ CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
 # (ej. ACOPENSIONES) hacen que el backend de Ekogui tarde demasiado en
 # construir una pagina con size=totalElements y el cliente termina en
 # TimeoutError; pedir en bloques fijos evita ese problema.
-LISTADO_PAGE_SIZE = 10000
+LISTING_PAGE_SIZE = 10000
 
 
 class EkoguiScraper(IEkoguiScraper):
@@ -48,7 +48,7 @@ class EkoguiScraper(IEkoguiScraper):
         self._sessionDataKey: Optional[str] = None
         self._msXsrf: Optional[str] = None
         self._msSocialAuthToken: Optional[str] = None
-        self._entidadTokens: dict[int, str] = {}
+        self._entityTokens: dict[int, str] = {}
         self.logger = logging.getLogger(__name__)
 
     def _cacheBuster(self) -> str:
@@ -160,12 +160,12 @@ class EkoguiScraper(IEkoguiScraper):
     # Datos de la persona / entidades disponibles (modulo /ekogui).
     # ------------------------------------------------------------------
 
-    async def buscarPersonaUsuario(self, client: IContextClient) -> int:
+    async def getUserPersonId(self, client: IContextClient) -> int:
         """GET /ekogui/api/buscarPersonaUsuario/{tipoDoc}|{documento} ->
-        retorna el 'id' de persona (personaId), usado luego para consultar
+        retorna el 'id' de persona (personId), usado luego para consultar
         las entidades a las que esa persona tiene acceso."""
-        identificacion = f"{self.documentType.lower()}%7C{self.documentNumber}"
-        url = f"{self.appBaseUrl}/api/buscarPersonaUsuario/{identificacion}?cacheBuster={self._cacheBuster()}"
+        identification = f"{self.documentType.lower()}%7C{self.documentNumber}"
+        url = f"{self.appBaseUrl}/api/buscarPersonaUsuario/{identification}?cacheBuster={self._cacheBuster()}"
         headers = {
             **self.headers.XHR_HEADERS,
             "X-Xsrf-Token": self._csrf,
@@ -176,30 +176,30 @@ class EkoguiScraper(IEkoguiScraper):
         #self.logger.info(f"[buscarPersonaUsuario] -> {resp.status} personaId={data.get('id')}")
         return data["id"]
 
-    async def obtenerEntidadesPersona(self, client: IContextClient, personaId: int) -> list[dict]:
-        """GET /ekogui/api/obtenerEntidadesPersona/{personaId} -> lista de
+    async def getPersonEntities(self, client: IContextClient, personId: int) -> list[dict]:
+        """GET /ekogui/api/obtenerEntidadesPersona/{personId} -> lista de
         entidades (cada una con 'id' y 'nombre') a las que el usuario tiene
         acceso para gestionar procesos judiciales."""
-        url = f"{self.appBaseUrl}/api/obtenerEntidadesPersona/{personaId}?cacheBuster={self._cacheBuster()}"
+        url = f"{self.appBaseUrl}/api/obtenerEntidadesPersona/{personId}?cacheBuster={self._cacheBuster()}"
         headers = {
             **self.headers.XHR_HEADERS,
             "X-Xsrf-Token": self._csrf,
             "Referer": f"{self.appBaseUrl}/",
         }
         resp = await client.get(url, headers=headers)
-        entidades = await resp.json(content_type=None)
-        #self.logger.info(f"[obtenerEntidadesPersona] -> {resp.status} ({len(entidades)} entidad(es))")
-        return entidades
+        entities = await resp.json(content_type=None)
+        #self.logger.info(f"[getPersonEntities] -> {resp.status} ({len(entities)} entidad(es))")
+        return entities
 
     # ------------------------------------------------------------------
     # Orquestador publico: SSO + seleccion de entidad (una sola vez por
-    # entidadId, cacheado) + listado paginado. El llamador no necesita saber
+    # entityId, cacheado) + listado paginado. El llamador no necesita saber
     # nada de moduleBaseUrl, tokens ni XSRF-TOKEN rotativo.
     # ------------------------------------------------------------------
 
-    async def listarProcesosDeEntidad(self, client: IContextClient, entidadId: int,
-                                       entidadNombre: str,
-                                       estado: str = "PROCESO_ENTIDAD_ACTIVO") -> list[dict]:
+    async def listEntityProcesses(self, client: IContextClient, entityId: int,
+                                  entityName: str,
+                                  state: str = "PROCESO_ENTIDAD_ACTIVO") -> list[dict]:
         """Trae TODOS los procesos de la entidad, sin que el llamador tenga
         que paginar: se pide 'totalElements' con una pagina minima y luego
         se pide esa misma cantidad como 'size'. Ekogui puede limitar el
@@ -210,57 +210,123 @@ class EkoguiScraper(IEkoguiScraper):
         if self._msSocialAuthToken is None:
             self._msSocialAuthToken = await self._signInModule(client, self.msBaseUrl)
 
-        idToken = self._entidadTokens.get(entidadId)
+        idToken = self._entityTokens.get(entityId)
         if idToken is None:
-            idToken = await self._seleccionarEntidad(client, self.msBaseUrl, entidadId, entidadNombre, self._msSocialAuthToken)
-            self._entidadTokens[entidadId] = idToken
+            idToken = await self._selectEntity(client, self.msBaseUrl, entityId, entityName, self._msSocialAuthToken)
+            self._entityTokens[entityId] = idToken
 
-        self.logger.info(f"⏏️ Extrayendo procesos - entidadId={entidadId} ({entidadNombre}) estado={estado}")
+        self.logger.info(f"⏏️ Extrayendo procesos - entidadId={entityId} ({entityName}) estado={state}")
 
-        conteo = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=0, size=1)
-        totalElements = conteo.get("totalElements", 0)
+        count = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=0, size=1)
+        totalElements = count.get("totalElements", 0)
         if not totalElements:
-            self.logger.warning(f"🟡 entidadId={entidadId} ({entidadNombre}) sin procesos en estado={estado}")
+            self.logger.warning(f"🟡 entidadId={entityId} ({entityName}) sin procesos en estado={state}")
             return []
 
-        pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=0, size=LISTADO_PAGE_SIZE)
-        nuevos = pagina.get("content", [])
-        procesos = list(nuevos)
-        totalPages = pagina.get("totalPages", 1)
+        pageData = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=0, size=LISTING_PAGE_SIZE)
+        newItems = pageData.get("content", [])
+        processes = list(newItems)
+        totalPages = pageData.get("totalPages", 1)
         self.logger.info(
-            f"📥 entidadId={entidadId} ({entidadNombre}) pagina=0 extrajo={len(nuevos)} van={len(procesos)}/{totalElements}"
+            f"📥 entidadId={entityId} ({entityName}) pagina=0 extrajo={len(newItems)} van={len(processes)}/{totalElements}"
         )
 
         page = 1
-        while len(procesos) < totalElements and page < totalPages:
-            pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado, page=page, size=LISTADO_PAGE_SIZE)
-            nuevos = pagina.get("content", [])
-            procesos.extend(nuevos)
+        while len(processes) < totalElements and page < totalPages:
+            pageData = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=page, size=LISTING_PAGE_SIZE)
+            newItems = pageData.get("content", [])
+            processes.extend(newItems)
             self.logger.info(
-                f"📥 entidadId={entidadId} ({entidadNombre}) pagina={page} extrajo={len(nuevos)} van={len(procesos)}/{totalElements}"
+                f"📥 entidadId={entityId} ({entityName}) pagina={page} extrajo={len(newItems)} van={len(processes)}/{totalElements}"
             )
             page += 1
 
-        return procesos
+        return processes
 
-    async def buscarProcesoPorRadicado(self, client: IContextClient, entidadId: int,
-                                        entidadNombre: str, radicado: str,
-                                        estado: str = "PROCESO_ENTIDAD_ACTIVO") -> Optional[dict]:
+    async def searchProcessByCaseNumber(self, client: IContextClient, entityId: int,
+                                        entityName: str, caseNumber: str,
+                                        state: str = "PROCESO_ENTIDAD_ACTIVO") -> Optional[dict]:
         """Busca UN proceso puntual por su numeroProceso (radicado) dentro de
         la entidad, usando el mismo campo 'filtroBuscar' que usa el buscador
         de la UI de Ekogui. Retorna el proceso si lo encuentra, o None."""
         if self._msSocialAuthToken is None:
             self._msSocialAuthToken = await self._signInModule(client, self.msBaseUrl)
 
-        idToken = self._entidadTokens.get(entidadId)
+        idToken = self._entityTokens.get(entityId)
         if idToken is None:
-            idToken = await self._seleccionarEntidad(client, self.msBaseUrl, entidadId, entidadNombre, self._msSocialAuthToken)
-            self._entidadTokens[entidadId] = idToken
+            idToken = await self._selectEntity(client, self.msBaseUrl, entityId, entityName, self._msSocialAuthToken)
+            self._entityTokens[entityId] = idToken
 
-        pagina = await self._listarProcesos(client, self.msBaseUrl, idToken, entidadId, estado,
-                                             page=0, size=1, filtroBuscar=radicado)
-        contenido = pagina.get("content", [])
-        return contenido[0] if contenido else None
+        pageData = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state,
+                                             page=0, size=1, searchFilter=caseNumber)
+        content = pageData.get("content", [])
+        return content[0] if content else None
+
+    async def searchProcessesByCaseNumbers(self, client: IContextClient, entityId: int,
+                                           entityName: str, caseNumbers: set[str],
+                                           state: str = "PROCESO_ENTIDAD_ACTIVO") -> list[dict]:
+        """Bulk lookup of case numbers WITHOUT one request per case number:
+        walks the same paginated listing used by listEntityProcesses
+        (LISTING_PAGE_SIZE chunks) and filters locally by numeroProceso. Only
+        matching processes are kept in memory (not the whole entity), and
+        paging stops as soon as every requested case number has shown up."""
+        if self._msSocialAuthToken is None:
+            self._msSocialAuthToken = await self._signInModule(client, self.msBaseUrl)
+
+        idToken = self._entityTokens.get(entityId)
+        if idToken is None:
+            idToken = await self._selectEntity(client, self.msBaseUrl, entityId, entityName, self._msSocialAuthToken)
+            self._entityTokens[entityId] = idToken
+
+        self.logger.info(
+            f"⏏️ Searching {len(caseNumbers)} case numbers in listing - entityId={entityId} ({entityName}) state={state}"
+        )
+
+        count = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=0, size=1)
+        totalElements = count.get("totalElements", 0)
+        if not totalElements:
+            self.logger.warning(f"🟡 entityId={entityId} ({entityName}) has no processes in state={state}")
+            return []
+
+        pending = set(caseNumbers)
+        found: list[dict] = []
+        seenIds: set = set()
+
+        def collectMatches(content: list[dict]) -> None:
+            for process in content:
+                caseNumber = str(process.get("numeroProceso") or "").strip()
+                if caseNumber not in caseNumbers or process.get("id") in seenIds:
+                    continue
+                seenIds.add(process.get("id"))
+                found.append(process)
+                pending.discard(caseNumber)
+
+        pageData = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=0, size=LISTING_PAGE_SIZE)
+        content = pageData.get("content", [])
+        collectMatches(content)
+        scanned = len(content)
+        totalPages = pageData.get("totalPages", 1)
+        self.logger.info(
+            f"📥 entityId={entityId} ({entityName}) page=0 scanned={scanned}/{totalElements} "
+            f"found={len(found)} pending={len(pending)}"
+        )
+
+        page = 1
+        while pending and scanned < totalElements and page < totalPages:
+            pageData = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=page, size=LISTING_PAGE_SIZE)
+            content = pageData.get("content", [])
+            collectMatches(content)
+            scanned += len(content)
+            self.logger.info(
+                f"📥 entityId={entityId} ({entityName}) page={page} scanned={scanned}/{totalElements} "
+                f"found={len(found)} pending={len(pending)}"
+            )
+            page += 1
+
+        if not pending:
+            self.logger.info(f"🟢 entityId={entityId} ({entityName}) all case numbers found; stopped paging at page={page - 1}")
+
+        return found
 
     # ------------------------------------------------------------------
     # SSO al modulo /ekoguims y listado paginado de procesos (privados).
@@ -336,13 +402,13 @@ class EkoguiScraper(IEkoguiScraper):
         self.logger.info(f"🟢 Sesion iniciada en {moduleBaseUrl}")
         return socialAuthToken
 
-    async def _seleccionarEntidad(self, client: IContextClient, moduleBaseUrl: str, entidadId: int,
-                                  entidadNombre: str, bearerToken: str) -> str:
-        """POST /ekoguims/api/seleccionar-entidad/{entidadId} -> retorna un
+    async def _selectEntity(self, client: IContextClient, moduleBaseUrl: str, entityId: int,
+                            entityName: str, bearerToken: str) -> str:
+        """POST /ekoguims/api/seleccionar-entidad/{entityId} -> retorna un
         nuevo JWT ('id_token') con los permisos/perfiles de esa entidad, que
         hay que usar como Authorization: Bearer en todas las llamadas
         siguientes de ese modulo."""
-        url = f"{moduleBaseUrl}/api/seleccionar-entidad/{entidadId}?cacheBuster={self._cacheBuster()}"
+        url = f"{moduleBaseUrl}/api/seleccionar-entidad/{entityId}?cacheBuster={self._cacheBuster()}"
         headers = {
             **self.headers.XHR_HEADERS,
             "Content-Type": "application/json;charset=UTF-8",
@@ -354,40 +420,40 @@ class EkoguiScraper(IEkoguiScraper):
         resp = await client.post(url, data=json.dumps({}), headers=headers)
         self._refreshMsXsrf(resp)
         data = await resp.json(content_type=None)
-        self.logger.info(f"[seleccionarEntidad] entidadId={entidadId} ({entidadNombre})")
+        self.logger.info(f"[seleccionarEntidad] entidadId={entityId} ({entityName})")
         if resp.status != 200 or not isinstance(data, dict) or "id_token" not in data:
             raise RuntimeError(
-                f"No se pudo seleccionar la entidad entidadId={entidadId} ({entidadNombre}): "
+                f"No se pudo seleccionar la entidad entidadId={entityId} ({entityName}): "
                 f"status={resp.status} respuesta={data!r}"
             )
         return data["id_token"]
 
-    async def _listarProcesos(self, client: IContextClient, moduleBaseUrl: str, idToken: str,
-                              entidadId: int, estado: str = "PROCESO_ENTIDAD_ACTIVO",
-                              page: int = 0, size: int = 100,
-                              filtroBuscar: Optional[str] = None) -> dict:
+    async def _listProcesses(self, client: IContextClient, moduleBaseUrl: str, idToken: str,
+                             entityId: int, state: str = "PROCESO_ENTIDAD_ACTIVO",
+                             page: int = 0, size: int = 100,
+                             searchFilter: Optional[str] = None) -> dict:
         """GET .../ekoguimsjudiciales/api/procesos/dominiodata/{filtro} ->
         pagina de procesos de la entidad (dict con 'content', 'totalPages',
         'last', etc). El filtro va como JSON URL-encoded DOS veces (asi
-        viaja en la traza real). 'filtroBuscar' es el mismo campo que usa el
-        buscador de la UI de Ekogui: si se manda el numeroProceso exacto,
-        Ekogui devuelve solo ese proceso."""
-        filtro = {
+        viaja en la traza real). 'searchFilter' viaja como 'filtroBuscar', el
+        mismo campo que usa el buscador de la UI de Ekogui: si se manda el
+        numeroProceso exacto, Ekogui devuelve solo ese proceso."""
+        filterPayload = {
             "orden": None,
-            "filtroBuscar": filtroBuscar,
-            "estado": estado,
-            "entidadId": str(entidadId),
+            "filtroBuscar": searchFilter,
+            "estado": state,
+            "entidadId": str(entityId),
             "modulo": "",
             "depEspecialId": None,
             "depEspecialList": [],
-            "llave": estado,
+            "llave": state,
             "tieneRepresentacionJudicial": None,
         }
-        filtroJson = json.dumps(filtro, separators=(",", ":"))
-        filtroDoblementeCodificado = urllib.parse.quote(urllib.parse.quote(filtroJson, safe=""), safe="")
+        filterJson = json.dumps(filterPayload, separators=(",", ":"))
+        doubleEncodedFilter = urllib.parse.quote(urllib.parse.quote(filterJson, safe=""), safe="")
 
         url = (
-            f"{moduleBaseUrl}/ekoguimsjudiciales/api/procesos/dominiodata/{filtroDoblementeCodificado}"
+            f"{moduleBaseUrl}/ekoguimsjudiciales/api/procesos/dominiodata/{doubleEncodedFilter}"
             f"?cacheBuster={self._cacheBuster()}&page={page}&size={size}"
         )
         headers = {
