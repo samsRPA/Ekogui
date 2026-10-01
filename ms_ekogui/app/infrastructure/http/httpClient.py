@@ -106,12 +106,13 @@ class AioHttpClient(IHttpClient):
             def __init__(self, session: aiohttp.ClientSession):
                 self.session = session
 
-            async def get(self, url, headers=None):
+            async def get(self, url, headers=None, timeout=None):
                 # Cookies filtradas para esta URL puntual (respeta Path/Domain
                 # via el propio matching de aiohttp). Sitios con la misma
                 # cookie repetida bajo distintos paths (ej. Ekogui usa
                 # XSRF-TOKEN con Path=/ekogui y Path=/ekoguims a la vez) rompen
                 # la validacion CSRF si se manda el valor equivocado.
+                effectiveTimeout = timeout if timeout is not None else outer.timeoutSeconds
                 max_attempts = max(1, len(outer._proxies))
                 for attempt in range(max_attempts):
                     current_proxy = outer._currentProxy()
@@ -121,7 +122,7 @@ class AioHttpClient(IHttpClient):
                     try:
                         return await asyncio.wait_for(
                             self.session.get(url, headers=headers, cookies=cookies or None, proxy=current_proxy, proxy_headers=current_proxy_headers),
-                            timeout=outer.timeoutSeconds,
+                            timeout=effectiveTimeout,
                         )
                     except (aiohttp.ClientHttpProxyError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
                         if attempt < max_attempts - 1:
@@ -131,8 +132,21 @@ class AioHttpClient(IHttpClient):
                         else:
                             raise
 
-            async def post(self, url, data=None, json=None, headers=None):
-                return await self.session.post(url, data=data, json=json, headers=headers, proxy=proxy, proxy_headers=proxyHeaders)
+            async def post(self, url, data=None, json=None, headers=None, timeout=None):
+                effectiveTimeout = timeout if timeout is not None else outer.timeoutSeconds
+                return await asyncio.wait_for(
+                    self.session.post(url, data=data, json=json, headers=headers, proxy=proxy, proxy_headers=proxyHeaders),
+                    timeout=effectiveTimeout,
+                )
+
+            def clearCookies(self):
+                # Algunos sitios (ej. ekoguims) solo mandan XSRF-TOKEN en el
+                # primer request de una sesion nueva; si el cookie-jar ya
+                # trae la cookie de sesion de un intento anterior fallido, el
+                # servidor asume que la sesion ya existe y deja de rotarla.
+                # Limpiar antes de reintentar un login/SSO evita ese estado
+                # contaminado.
+                self.session.cookie_jar.clear()
 
         sessionFailed = False
         try:

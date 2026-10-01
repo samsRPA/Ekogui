@@ -1,6 +1,7 @@
 import re
 import json
 import time
+import asyncio
 import logging
 import urllib.parse
 from typing import Optional
@@ -16,6 +17,15 @@ CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
 # construir una pagina con size=totalElements y el cliente termina en
 # TimeoutError; pedir en bloques fijos evita ese problema.
 LISTING_PAGE_SIZE = 10000
+
+# Timeout corto para los pasos de login (GET/POST livianos). El timeout
+# global de 300s del cliente HTTP esta pensado para las paginas pesadas de
+# listado, no para esto: sin un timeout propio, un solo paso de login
+# colgado se comia los 300s completos y tumbaba todo el trabajo masivo sin
+# procesar nada.
+LOGIN_REQUEST_TIMEOUT_SECONDS = 25
+LOGIN_MAX_ATTEMPTS = 3
+LOGIN_RETRY_BACKOFF_SECONDS = 5
 
 
 class EkoguiScraper(IEkoguiScraper):
@@ -60,18 +70,37 @@ class EkoguiScraper(IEkoguiScraper):
 
     async def login(self, client: IContextClient) -> bool:
         """Ejecuta el flujo completo de autenticacion y retorna True si al
-        final quedamos con la sesion logueada (home de Ekogui, no el login)."""
+        final quedamos con la sesion logueada (home de Ekogui, no el login).
+        Reintenta el flujo completo (desde el GET inicial) hasta
+        LOGIN_MAX_ATTEMPTS veces si algun paso falla o se cuelga, ya que un
+        timeout puntual en un paso no significa que el sitio este realmente
+        caido."""
         self.logger.info(f"🔐 Iniciando sesion para cedula {self.documentType}|{self.documentNumber}")
-        xsrfToken = await self._openHomePage(client)
-        sessionDataKey = await self._startSignIn(client, xsrfToken)
-        return await self._submitCredentials(client, sessionDataKey)
+        lastError: Optional[Exception] = None
+        for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+            try:
+                xsrfToken = await self._openHomePage(client)
+                sessionDataKey = await self._startSignIn(client, xsrfToken)
+                return await self._submitCredentials(client, sessionDataKey)
+            except Exception as e:
+                lastError = e
+                if attempt < LOGIN_MAX_ATTEMPTS:
+                    self.logger.warning(
+                        f"🟡 Intento {attempt}/{LOGIN_MAX_ATTEMPTS} de login fallo ({e}); "
+                        f"reintentando en {LOGIN_RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    client.clearCookies()
+                    await asyncio.sleep(LOGIN_RETRY_BACKOFF_SECONDS)
+                else:
+                    self.logger.error(f"🔴 Login fallo tras {LOGIN_MAX_ATTEMPTS} intentos: {e}")
+        raise lastError
 
     async def _openHomePage(self, client: IContextClient) -> str:
         """Paso 1: GET /ekogui/. Crea el XSRF-TOKEN (cookie de la app
         Angular/Spring, path=/ekogui) que hay que reenviar como '_csrf' en el
         POST de signin."""
         url = f"{self.appBaseUrl}/"
-        resp = await client.get(url, headers=self.headers.NAV_HEADERS)
+        resp = await client.get(url, headers=self.headers.NAV_HEADERS, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
         await resp.read()
 
         xsrfCookie = resp.cookies.get("XSRF-TOKEN")
@@ -96,7 +125,7 @@ class EkoguiScraper(IEkoguiScraper):
             "Origin": self.appOrigin,
             "Referer": f"{self.appBaseUrl}/",
         }
-        resp = await client.post(url, data=data, headers=headers)
+        resp = await client.post(url, data=data, headers=headers, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
         html = await resp.text()
 
         finalUrl = str(resp.url)
@@ -133,7 +162,7 @@ class EkoguiScraper(IEkoguiScraper):
             "Origin": self.authBaseUrl,
             "Referer": loginDoUrl,
         }
-        resp = await client.post(f"{self.authBaseUrl}/commonauth", data=data, headers=headers)
+        resp = await client.post(f"{self.authBaseUrl}/commonauth", data=data, headers=headers, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
         html = await resp.text()
         return resp, html
 
@@ -342,6 +371,26 @@ class EkoguiScraper(IEkoguiScraper):
             self._msXsrf = cookie.value
 
     async def _signInModule(self, client: IContextClient, moduleBaseUrl: str) -> str:
+        """Igual que login(): reintenta el handshake SSO completo hasta
+        LOGIN_MAX_ATTEMPTS veces si algun paso falla o se cuelga."""
+        lastError: Optional[Exception] = None
+        for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+            try:
+                return await self._signInModuleOnce(client, moduleBaseUrl)
+            except Exception as e:
+                lastError = e
+                if attempt < LOGIN_MAX_ATTEMPTS:
+                    self.logger.warning(
+                        f"🟡 Intento {attempt}/{LOGIN_MAX_ATTEMPTS} de SSO a {moduleBaseUrl} fallo ({e}); "
+                        f"reintentando en {LOGIN_RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    client.clearCookies()
+                    await asyncio.sleep(LOGIN_RETRY_BACKOFF_SECONDS)
+                else:
+                    self.logger.error(f"🔴 SSO a {moduleBaseUrl} fallo tras {LOGIN_MAX_ATTEMPTS} intentos: {e}")
+        raise lastError
+
+    async def _signInModuleOnce(self, client: IContextClient, moduleBaseUrl: str) -> str:
         """Intenta el mismo handshake SSO de login() pero apuntando a otro
         modulo (/ekoguims), esperando que el IS reconozca la sesion ya
         autenticada (cookie commonAuthId) y redirija directo sin pedir
@@ -357,7 +406,7 @@ class EkoguiScraper(IEkoguiScraper):
         Guarda el XSRF-TOKEN del modulo y retorna el JWT
         'social-authentication' (el que hay que mandar como Authorization:
         Bearer en seleccionar-entidad)."""
-        resp = await client.get(f"{moduleBaseUrl}/", headers=self.headers.NAV_HEADERS)
+        resp = await client.get(f"{moduleBaseUrl}/", headers=self.headers.NAV_HEADERS, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
         await resp.read()
         xsrfCookie = resp.cookies.get("XSRF-TOKEN")
         if xsrfCookie is None:
@@ -370,7 +419,7 @@ class EkoguiScraper(IEkoguiScraper):
             "Origin": self.appOrigin,
             "Referer": f"{moduleBaseUrl}/",
         }
-        resp = await client.post(f"{moduleBaseUrl}/signin/ekogui", data=data, headers=headers)
+        resp = await client.post(f"{moduleBaseUrl}/signin/ekogui", data=data, headers=headers, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
         html = await resp.text()
 
         if 'id="loginForm"' in html:

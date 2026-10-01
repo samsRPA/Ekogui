@@ -6,7 +6,12 @@ import aiohttp
 class IContextClient(Protocol):
     """Forma del cliente temporal que entrega IHttpClient.contextClient()."""
 
-    async def get(self, url: str, headers: Optional[dict] = None) -> aiohttp.ClientResponse:
+    async def get(
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        timeout: Optional[float] = None,
+    ) -> aiohttp.ClientResponse:
         ...
 
     async def post(
@@ -15,5 +20,9 @@ class IContextClient(Protocol):
         data: Optional[dict] = None,
         json: Optional[dict] = None,
         headers: Optional[dict] = None,
+        timeout: Optional[float] = None,
     ) -> aiohttp.ClientResponse:
+        ...
+
+    def clearCookies(self) -> None:
         ...
