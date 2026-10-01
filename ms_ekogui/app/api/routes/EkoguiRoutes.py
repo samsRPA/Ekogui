@@ -129,7 +129,7 @@ async def searchCaseNumbersBulkExcel(
     ekoguiService: IEkoguiService = Depends(Provide[Dependencies.ekoguiService]),
 ):
     if not (file.filename or "").lower().endswith(EXCEL_EXTENSIONS):
-        raise HTTPException(status_code=400, detail=f"Only {', '.join(EXCEL_EXTENSIONS)} files are supported")
+        raise HTTPException(status_code=400, detail=f"Solo se aceptan archivos {', '.join(EXCEL_EXTENSIONS)}")
 
     content = await file.read()
     try:

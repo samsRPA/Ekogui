@@ -13,11 +13,11 @@ class OpenpyxlExcelReader(IExcelReader):
         try:
             workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         except (InvalidFileException, BadZipFile, KeyError, OSError) as e:
-            raise ValueError(f"Could not read the file as an .xlsx workbook: {e}")
+            raise ValueError(f"No se pudo leer el archivo como Excel .xlsx: {e}")
 
         try:
             if not workbook.worksheets:
-                raise ValueError("The workbook has no sheets")
+                raise ValueError("El Excel no tiene hojas")
 
             sheet = workbook.worksheets[0]
             values: List[str] = []

@@ -217,7 +217,7 @@ class EkoguiService(IEkoguiService):
         batches of batchSize so several bot replicas can share the work."""
         valid, invalid = self._normalizeCaseNumbers(caseNumbers)
         self.logger.info(
-            f"🌐 Starting bulk search - entityId={entityId} state={state} valid={len(valid)} invalid={len(invalid)} batchSize={batchSize}"
+            f"🌐 Iniciando busqueda masiva - entidadId={entityId} estado={state} validos={len(valid)} invalidos={len(invalid)} batchSize={batchSize}"
         )
 
         result = {
@@ -230,19 +230,19 @@ class EkoguiService(IEkoguiService):
             "invalid": invalid,
         }
         if not valid:
-            self.logger.warning(f"🟡 entityId={entityId} no valid case numbers to search")
+            self.logger.warning(f"🟡 entidadId={entityId} sin radicados validos para buscar")
             return result
 
         async with self.httpClient.contextClient() as client:
             loggedIn = await self.scraper.login(client)
             if not loggedIn:
-                raise RuntimeError("Could not log in to Ekogui")
+                raise RuntimeError("No se pudo iniciar sesion en Ekogui")
 
             personId = await self.scraper.getUserPersonId(client)
             availableEntities = await self.scraper.getPersonEntities(client, personId)
             entity = {e["id"]: e for e in availableEntities}.get(entityId)
             if entity is None:
-                raise ValueError(f"entityId={entityId} is not among the entities available to this user")
+                raise ValueError(f"entidadId={entityId} no esta entre las entidades disponibles para este usuario")
 
             entityName = entity["nombre"]
             processes = await self.scraper.searchProcessesByCaseNumbers(client, entityId, entityName, set(valid), state)
@@ -257,16 +257,16 @@ class EkoguiService(IEkoguiService):
                 publishedBatches += 1
             except Exception:
                 self.logger.exception(
-                    f"🔴 Error publishing batch {index}/{totalBatches} of entityId={entityId} ({entityName}); "
-                    f"continuing with the next batch"
+                    f"🔴 Error publicando lote {index}/{totalBatches} de entidadId={entityId} ({entityName}); "
+                    f"se continua con el siguiente lote"
                 )
 
         foundCaseNumbers = {str(p.get("numeroProceso") or "").strip() for p in processes}
         notFound = [caseNumber for caseNumber in valid if caseNumber not in foundCaseNumbers]
 
         self.logger.info(
-            f"🟢 Bulk search finished - entityId={entityId} ({entityName}) -> "
-            f"found={len(processes)} publishedBatches={publishedBatches}/{totalBatches} notFound={len(notFound)} invalid={len(invalid)}"
+            f"🟢 Busqueda masiva finalizada - entidadId={entityId} ({entityName}) -> "
+            f"encontrados={len(processes)} lotesPublicados={publishedBatches}/{totalBatches} noEncontrados={len(notFound)} invalidos={len(invalid)}"
         )
         result.update(found=len(processes), publishedBatches=publishedBatches, notFound=notFound)
         return result
@@ -277,8 +277,8 @@ class EkoguiService(IEkoguiService):
         not a case number, so files with or without header both work."""
         values = await asyncio.to_thread(self.excelReader.readFirstColumn, content)
         if values and self._cleanCaseNumber(values[0]) is None:
-            self.logger.info(f"📄 Skipping header row '{values[0]}'")
+            self.logger.info(f"📄 Se omite el encabezado '{values[0]}'")
             values = values[1:]
 
-        self.logger.info(f"📄 Excel read - {len(values)} values in the first column")
+        self.logger.info(f"📄 Excel leido - {len(values)} valores en la primera columna")
         return await self.searchCaseNumbersBulk(entityId, values, state, batchSize)

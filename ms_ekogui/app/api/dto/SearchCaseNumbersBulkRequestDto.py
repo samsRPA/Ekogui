@@ -17,5 +17,5 @@ class SearchCaseNumbersBulkRequestDto(BaseModel):
     @classmethod
     def validateCaseNumbers(cls, v):
         if not isinstance(v, list) or len(v) == 0:
-            raise ValueError("Send a list with at least one case number")
+            raise ValueError("Envía una lista con al menos un radicado")
         return v

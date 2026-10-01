@@ -279,13 +279,13 @@ class EkoguiScraper(IEkoguiScraper):
             self._entityTokens[entityId] = idToken
 
         self.logger.info(
-            f"⏏️ Searching {len(caseNumbers)} case numbers in listing - entityId={entityId} ({entityName}) state={state}"
+            f"⏏️ Buscando {len(caseNumbers)} radicados en el listado - entidadId={entityId} ({entityName}) estado={state}"
         )
 
         count = await self._listProcesses(client, self.msBaseUrl, idToken, entityId, state, page=0, size=1)
         totalElements = count.get("totalElements", 0)
         if not totalElements:
-            self.logger.warning(f"🟡 entityId={entityId} ({entityName}) has no processes in state={state}")
+            self.logger.warning(f"🟡 entidadId={entityId} ({entityName}) sin procesos en estado={state}")
             return []
 
         pending = set(caseNumbers)
@@ -307,8 +307,8 @@ class EkoguiScraper(IEkoguiScraper):
         scanned = len(content)
         totalPages = pageData.get("totalPages", 1)
         self.logger.info(
-            f"📥 entityId={entityId} ({entityName}) page=0 scanned={scanned}/{totalElements} "
-            f"found={len(found)} pending={len(pending)}"
+            f"📥 entidadId={entityId} ({entityName}) pagina=0 revisados={scanned}/{totalElements} "
+            f"encontrados={len(found)} pendientes={len(pending)}"
         )
 
         page = 1
@@ -318,13 +318,13 @@ class EkoguiScraper(IEkoguiScraper):
             collectMatches(content)
             scanned += len(content)
             self.logger.info(
-                f"📥 entityId={entityId} ({entityName}) page={page} scanned={scanned}/{totalElements} "
-                f"found={len(found)} pending={len(pending)}"
+                f"📥 entidadId={entityId} ({entityName}) pagina={page} revisados={scanned}/{totalElements} "
+                f"encontrados={len(found)} pendientes={len(pending)}"
             )
             page += 1
 
         if not pending:
-            self.logger.info(f"🟢 entityId={entityId} ({entityName}) all case numbers found; stopped paging at page={page - 1}")
+            self.logger.info(f"🟢 entidadId={entityId} ({entityName}) aparecieron todos los radicados; se dejo de paginar en pagina={page - 1}")
 
         return found
 
