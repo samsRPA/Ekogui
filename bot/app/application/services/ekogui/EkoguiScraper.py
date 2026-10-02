@@ -284,10 +284,27 @@ class EkoguiScraper(IEkoguiScraper):
             "Origin": self.appOrigin,
             "Referer": f"{moduleBaseUrl}/",
         }
-        resp = await client.post(url, data=json.dumps({}), headers=headers)
-        self._refreshMsXsrf(resp)
-        data = await resp.json(content_type=None)
-        return data["id_token"]
+
+        lastError: Optional[Exception] = None
+        for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+            try:
+                resp = await client.post(url, data=json.dumps({}), headers=headers, timeout=LOGIN_REQUEST_TIMEOUT_SECONDS)
+                self._refreshMsXsrf(resp)
+                data = await resp.json(content_type=None)
+                return data["id_token"]
+            except Exception as e:
+                lastError = e
+                if attempt < LOGIN_MAX_ATTEMPTS:
+                    self.logger.warning(
+                        f"🟡 Intento {attempt}/{LOGIN_MAX_ATTEMPTS} de seleccionar-entidad fallo "
+                        f"(entidadId={entidadId}): {e}; reintentando en {LOGIN_RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    await asyncio.sleep(LOGIN_RETRY_BACKOFF_SECONDS)
+                else:
+                    self.logger.error(
+                        f"🔴 seleccionar-entidad fallo tras {LOGIN_MAX_ATTEMPTS} intentos (entidadId={entidadId}): {e}"
+                    )
+        raise lastError
 
     # ------------------------------------------------------------------
     # Orquestador publico: login + SSO + seleccion de entidad, todo en uno.

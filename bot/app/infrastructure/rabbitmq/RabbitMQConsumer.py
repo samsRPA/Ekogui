@@ -1,3 +1,4 @@
+import json
 import logging
 import asyncio
 from typing import Callable, Awaitable
@@ -66,10 +67,22 @@ class RabbitMQConsumer(IBrokerConsumer):
                 except MessageProcessError:
                     self.logger.warning("🟡 Intento de NACK/ACK inválido.")
 
-                except Exception as e:
-                    self.logger.error(f"🔴 Error procesando mensaje: {e}")
+                except json.JSONDecodeError as e:
+                    # Mensaje irrecuperable (nunca va a parsear distinto):
+                    # reencolarlo solo lo haria reintentar para siempre.
+                    self.logger.error(f"🔴 Mensaje invalido (JSON malformado), se descarta: {e}")
                     try:
                         await message.nack(requeue=False)
+                    except MessageProcessError:
+                        self.logger.warning("🟡 Mensaje ya estaba procesado.")
+
+                except Exception as e:
+                    # Fallas de red/sesion con Ekogui son transitorias (el
+                    # sitio externo puede estar inestable): reencolar en vez
+                    # de descartar para no perder el lote de procesos.
+                    self.logger.error(f"🔴 Error procesando mensaje, se reencola: {e}")
+                    try:
+                        await message.nack(requeue=True)
                     except MessageProcessError:
                         self.logger.warning("🟡 Mensaje ya estaba procesado.")
 

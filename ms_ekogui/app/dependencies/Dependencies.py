@@ -25,6 +25,7 @@ class Dependencies(containers.DeclarativeContainer):
     httpClient: providers.Singleton[IHttpClient] = providers.Singleton(
         AioHttpClient,
         sslIntermediateCertPath=settings.provided.http.sslIntermediateCertPath,
+        proxies=settings.provided.proxy.proxies,
     )
 
     # Provider del scraper (login + listado paginado de procesos)

@@ -15,8 +15,10 @@ CLIENT_ID = "Ofli249wJGRCnTf9bF1x7t979uMa"
 # Tamano fijo de pagina al listar procesos. Entidades con muchos procesos
 # (ej. ACOPENSIONES) hacen que el backend de Ekogui tarde demasiado en
 # construir una pagina con size=totalElements y el cliente termina en
-# TimeoutError; pedir en bloques fijos evita ese problema.
-LISTING_PAGE_SIZE = 10000
+# TimeoutError; pedir en bloques fijos evita ese problema. Incluso 10000
+# resulto demasiado grande para ACOPENSIONES (timeout de 300s agotado en
+# los 3 reintentos), asi que se bajo a 2000.
+LISTING_PAGE_SIZE = 2000
 
 # Timeout corto para los pasos de login (GET/POST livianos). El timeout
 # global de 300s del cliente HTTP esta pensado para las paginas pesadas de
@@ -26,6 +28,12 @@ LISTING_PAGE_SIZE = 10000
 LOGIN_REQUEST_TIMEOUT_SECONDS = 25
 LOGIN_MAX_ATTEMPTS = 3
 LOGIN_RETRY_BACKOFF_SECONDS = 5
+
+# Entidades con muchos procesos (ej. ACOPENSIONES) pueden hacer que el
+# backend de Ekogui tarde en responder incluso una pagina chica; un timeout
+# puntual ahi no debe tumbar toda la busqueda/listado masivo.
+LISTING_MAX_ATTEMPTS = 3
+LISTING_RETRY_BACKOFF_SECONDS = 5
 
 
 class EkoguiScraper(IEkoguiScraper):
@@ -511,7 +519,25 @@ class EkoguiScraper(IEkoguiScraper):
             "X-Xsrf-Token": self._msXsrf,
             "Referer": f"{moduleBaseUrl}/",
         }
-        resp = await client.get(url, headers=headers)
-        self._refreshMsXsrf(resp)
-        data = await resp.json(content_type=None)
-        return data
+
+        lastError: Optional[Exception] = None
+        for attempt in range(1, LISTING_MAX_ATTEMPTS + 1):
+            try:
+                resp = await client.get(url, headers=headers)
+                self._refreshMsXsrf(resp)
+                return await resp.json(content_type=None)
+            except Exception as e:
+                lastError = e
+                if attempt < LISTING_MAX_ATTEMPTS:
+                    self.logger.warning(
+                        f"🟡 Intento {attempt}/{LISTING_MAX_ATTEMPTS} de listar procesos fallo "
+                        f"(entidadId={entityId} page={page} size={size}): {e}; "
+                        f"reintentando en {LISTING_RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    await asyncio.sleep(LISTING_RETRY_BACKOFF_SECONDS)
+                else:
+                    self.logger.error(
+                        f"🔴 Listar procesos fallo tras {LISTING_MAX_ATTEMPTS} intentos "
+                        f"(entidadId={entityId} page={page} size={size}): {e}"
+                    )
+        raise lastError

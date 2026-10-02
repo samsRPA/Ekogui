@@ -1,4 +1,7 @@
-from pydantic import Field
+import json
+from typing import List, Optional
+
+from pydantic import Field, field_validator
 
 from app.config.base import EnvConfig
 from pydantic_settings import BaseSettings
@@ -18,10 +21,21 @@ class EkoguiCredentialsSettings(EnvConfig):
 class HttpSettings(EnvConfig):
     sslIntermediateCertPath: str = Field(..., alias="SSL_INTERMEDIATE_CERT_PATH")
 
+class proxiesSettings(EnvConfig):
+    proxies: List[Optional[str]] = Field(default_factory=list, alias="PROXIES")
+
+    @field_validator("proxies", mode="before")
+    @classmethod
+    def parse_proxies(cls, v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
 class Settings(BaseSettings):
     rabbitmq: RabbitMQSettings = RabbitMQSettings()
     ekoguiCredentials: EkoguiCredentialsSettings = EkoguiCredentialsSettings()
     http: HttpSettings = HttpSettings()
+    proxy: proxiesSettings = proxiesSettings()
 
 
 def loadConfig() -> Settings:
