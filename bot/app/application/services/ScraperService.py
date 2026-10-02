@@ -26,13 +26,14 @@ class ScraperService(IScraperService):
 
     def __init__(self, scraper: IEkoguiScraper, httpClient: IHttpClient,
                  db:IDatabase, dataBaseService:IDataBaseService,  producer:IBrokerProducer,
-                 collProducer:IBrokerProducer):
+                 collProducer:IBrokerProducer, retryProducer:IBrokerProducer):
         self.scraper = scraper
         self.httpClient = httpClient
         self.db = db
         self.dataBaseService = dataBaseService
         self.producer = producer
         self.collProducer = collProducer
+        self.retryProducer = retryProducer
         self.logger = logging.getLogger(__name__)
         self.ENTIDAD_COLPENSIONES = "ADMINISTRADORA COLOMBIANA DE PENSIONES"
 
@@ -66,13 +67,32 @@ class ScraperService(IScraperService):
                 totalActuaciones += actuacionesCount
             except Exception:
                 self.logger.exception(
-                    f"🔴 Error procesando procesoId={proceso.procesoId} ({proceso.numeroProceso}); se continua con el resto del lote"
+                    f"🔴 Error procesando procesoId={proceso.procesoId} ({proceso.numeroProceso}); "
+                    f"se reencola solo este proceso y se continua con el resto del lote"
                 )
+                await self._reencolarProceso(data, proceso)
 
         self.logger.info(
             f"🟢 Scraper terminado de este lote - entidadId={data.entidadId} ({data.entidadNombre}) -> "
             f"{totalDocumentos} documento(s), {totalActuaciones} actuacion(es) extraidas"
         )
+
+    async def _reencolarProceso(self, data: EkoguiReq, proceso: ProcesoItem) -> None:
+        """Vuelve a publicar en ekogui_queue un unico proceso que fallo
+        dentro de un lote, en vez de reencolar el lote (10 procesos)
+        completo. El resto del lote ya se proceso/publico normalmente."""
+        retry = EkoguiReq(
+            entidadId=data.entidadId,
+            entidadNombre=data.entidadNombre,
+            estado=data.estado,
+            procesos=[proceso],
+        )
+        try:
+            await self.retryProducer.publishMessage(retry.model_dump(mode="json"), priority=1)
+        except Exception:
+            self.logger.exception(
+                f"🔴 No se pudo reencolar procesoId={proceso.procesoId} ({proceso.numeroProceso}); se pierde este proceso"
+            )
 
     def _buildActuacionDto(self, proceso: ProcesoItem, doc: dict) -> ActuacionDto:
         """Arma el registro de actuacion (destino RAMA), uno por documento
@@ -238,6 +258,7 @@ class ScraperService(IScraperService):
         actuaciones: list[ActuacionDto] = []
         sesionYaRefrescada = False
         omitidosPorEntidad = 0
+        erroresResolucion = 0
         for doc in documentos:
             archivoId = doc.get("archivoId")
             if not doc.get("archivoIdSgd"):
@@ -265,6 +286,7 @@ class ScraperService(IScraperService):
                 autos.append(self._buildAutoItemDto(doc, imagenUrl))
                 actuaciones.append(self._buildActuacionDto(proceso, doc))
             except Exception:
+                erroresResolucion += 1
                 self.logger.exception(
                     f"🔴 Error resolviendo archivoId={archivoId} de radicado={proceso.numeroProceso} "
                     f"(procesoId={proceso.procesoId}); se continua"
@@ -275,6 +297,13 @@ class ScraperService(IScraperService):
                 f"🟡 radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}) tenia "
                 f"{len(documentos)} documento(s) pero ninguno quedo disponible para publicar."
             )
+            if erroresResolucion:
+                # Hubo al menos un fallo real (no solo omisiones normales por
+                # SGD/entidad), asi que vale la pena reencolar este proceso.
+                raise RuntimeError(
+                    f"radicado={proceso.numeroProceso} (procesoId={proceso.procesoId}): "
+                    f"{erroresResolucion} documento(s) fallaron al resolver su URL"
+                )
             return len(documentos), 0, idToken
 
         actuacionesPublicadas = await self._publishActuaciones(actuaciones)

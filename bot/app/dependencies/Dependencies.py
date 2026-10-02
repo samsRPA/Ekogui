@@ -107,6 +107,19 @@ class Dependencies(containers.DeclarativeContainer):
         password=settings.provided.rabbitmq.password,
     )
 
+    # Productor RabbitMQ - republica hacia la MISMA cola de entrada
+    # (ekogui_queue) un proceso puntual que fallo dentro de un lote, sin
+    # tener que reencolar el lote completo (ver ScraperService._process).
+    retryProducer: providers.Singleton[IBrokerProducer] = providers.Singleton(
+        RabbitMQProducer,
+        host=settings.provided.rabbitmq.host,
+        port=settings.provided.rabbitmq.port,
+        queueName=settings.provided.rabbitmq.queueScrapeName,
+        login=settings.provided.rabbitmq.user,
+        password=settings.provided.rabbitmq.password,
+        maxPriority=2,
+    )
+
     # Servicio principal
     scraperService: providers.Factory[IScraperService] = providers.Factory(
         ScraperService,
@@ -116,6 +129,7 @@ class Dependencies(containers.DeclarativeContainer):
         dataBaseService=dataBaseService,
         producer=autosProducer,
         collProducer=collProducer,
+        retryProducer=retryProducer,
     )
 
     # Consumidor RabbitMQ - escucha la cola donde ms_ekogui publica los lotes
